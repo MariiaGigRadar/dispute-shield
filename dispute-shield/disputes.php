@@ -1,6 +1,5 @@
 <?php
 require_once __DIR__ . '/config.php';
-require_once __DIR__ . '/vendor/autoload.php';
 require_once __DIR__ . '/app/db.php';
 require_once __DIR__ . '/app/posthog.php';
 
@@ -8,11 +7,10 @@ require_once __DIR__ . '/app/posthog.php';
 if (($_GET['key'] ?? '') !== DASH_KEY) { http_response_code(403); exit('Forbidden'); }
 
 $db     = getDb();
-$stripe = new \Stripe\StripeClient(STRIPE_SECRET_KEY);
 $action = $_GET['action'] ?? 'list';
 $id     = $_GET['id'] ?? '';
 
-// AJAX: preview evidence for an email
+// AJAX: preview evidence for an email — pure PostHog query, no Stripe
 if ($action === 'preview') {
     header('Content-Type: application/json');
     echo json_encode(getPostHogUser($_POST['email'] ?? ''));
@@ -57,11 +55,11 @@ tr:hover td{background:#0f172a55}
 .bw{background:#fffbeb;color:#f59e0b}.bu{background:#fef2f2;color:#ef4444}
 .br{background:#eff6ff;color:#3b82f6}.bg{background:#ecfdf5;color:#10b981}
 .bl{background:#fef2f2;color:#ef4444}.bc{background:#f1f5f9;color:#64748b}
-a{color:#818cf8;text-decoration:none}.a:hover{text-decoration:underline}
+a{color:#818cf8;text-decoration:none}
 .btn{padding:4px 11px;border-radius:6px;font-size:11px;font-weight:600;border:1px solid #334155;background:#1e293b;color:#94a3b8;cursor:pointer;text-decoration:none;display:inline-block}
 input[type=email]{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px 14px;color:#f1f5f9;font-size:13px;width:300px}
 button.go{padding:8px 18px;background:#6366f1;border:none;color:#fff;border-radius:8px;cursor:pointer;font-weight:700;margin-left:8px}
-pre{background:#020617;border:1px solid #1e293b;border-radius:8px;padding:14px;font-size:11px;color:#94a3b8;white-space:pre-wrap;margin-top:12px;display:none}
+pre{background:#020617;border:1px solid #1e293b;border-radius:8px;padding:14px;font-size:11px;color:#94a3b8;white-space:pre-wrap;margin-top:12px;display:none;max-height:500px;overflow:auto}
 </style>
 </head>
 <body>
@@ -69,7 +67,7 @@ pre{background:#020617;border:1px solid #1e293b;border-radius:8px;padding:14px;f
   <div class="logo">⚡</div>
   <div>
     <div style="font-weight:800;font-size:15px;color:#f1f5f9">DisputeShield</div>
-    <div style="font-size:10px;color:#475569;font-family:monospace">PostHog · Stripe · Auto-evidence</div>
+    <div style="font-size:10px;color:#475569;font-family:monospace">PostHog · Auto-evidence</div>
   </div>
 </div>
 <div class="wrap">
@@ -84,7 +82,7 @@ pre{background:#020617;border:1px solid #1e293b;border-radius:8px;padding:14px;f
 
 <!-- Preview form -->
 <div class="card">
-  <div class="ch">🔍 Test: Preview evidence for any email (no submission)</div>
+  <div class="ch">🔍 Test: Preview PostHog data for any email</div>
   <div style="padding:16px 20px">
     <input type="email" id="em" placeholder="customer@email.com">
     <button class="go" onclick="preview()">Preview</button>
@@ -126,7 +124,7 @@ pre{background:#020617;border:1px solid #1e293b;border-radius:8px;padding:14px;f
     <?php endforeach; ?>
     <?php if(empty($rows)): ?>
     <tr><td colspan="7" style="text-align:center;color:#475569;padding:40px">
-      No disputes yet — they'll appear here when Stripe sends a webhook.
+      No disputes yet — they will appear here when Stripe sends a webhook.
     </td></tr>
     <?php endif; ?>
     </tbody>
@@ -138,12 +136,17 @@ pre{background:#020617;border:1px solid #1e293b;border-radius:8px;padding:14px;f
 async function preview() {
   const em  = document.getElementById('em').value;
   const out = document.getElementById('out');
+  if (!em) { alert('Enter an email first'); return; }
   out.style.display = 'block';
-  out.textContent   = 'Querying PostHog…';
+  out.textContent   = 'Querying PostHog...';
   const fd = new FormData();
   fd.append('email', em);
-  const r = await fetch('?key=<?=$key?>&action=preview', {method:'POST',body:fd});
-  out.textContent = JSON.stringify(await r.json(), null, 2);
+  try {
+    const r = await fetch('?key=<?=$key?>&action=preview', {method:'POST',body:fd});
+    out.textContent = JSON.stringify(await r.json(), null, 2);
+  } catch (e) {
+    out.textContent = 'Error: ' + e.message;
+  }
 }
 </script>
 </body></html>
