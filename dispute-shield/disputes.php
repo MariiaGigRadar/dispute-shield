@@ -29,10 +29,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
 
 // Check session
 if (empty($_SESSION['gr_user'])) {
-    // Show login page
     $err = $loginError ?? '';
-    echo <<<HTML
-<!DOCTYPE html>
+    $errHtml = $err ? '<div class="err">' . htmlspecialchars($err) . '</div>' : '';
+    ?><!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -48,7 +47,7 @@ input{width:100%;background:#0f172a;border:1px solid #334155;border-radius:8px;p
 input:focus{border-color:#6366f1}
 button{width:100%;padding:11px;background:#6366f1;border:none;color:#fff;border-radius:8px;cursor:pointer;font-weight:700;font-size:14px}
 button:hover{background:#4f46e5}
-.err{color:#f87171;font-size:12px;margin-bottom:12px}
+.err{color:#f87171;font-size:12px;margin-bottom:12px;padding:8px;background:#1a0a0a;border-radius:6px}
 </style>
 </head>
 <body>
@@ -56,14 +55,13 @@ button:hover{background:#4f46e5}
   <div class="logo">⚡</div>
   <h1>DisputeShield</h1>
   <p>GigRadar internal tool</p>
-  '.($err ? '<div class=\'err\'>'.htmlspecialchars($err).'</div>' : '').'
+  <?= $errHtml ?>
   <form method="POST">
     <input type="password" name="password" placeholder="Enter your password" autofocus>
     <button type="submit">Sign In</button>
   </form>
 </div>
-</body></html>
-HTML;
+</body></html><?php
     exit;
 }
 
