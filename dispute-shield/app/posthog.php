@@ -83,13 +83,29 @@ function getPostHogUser(string $email): array {
     $revenue   = (float)($row[16] ?? 0);
     $planProp  = $row[21] ?? '';
 
+    // Map Stripe price IDs to human plan names
+    $planMap = [
+        'price_1REyczICsmQmrsT0wlIUZJGH' => 'Agency Pro (Annual)',
+        'price_1REyczICsmQmrsT0hyNvW'     => 'Agency Pro (Monthly)',
+        'price_1abc'                       => 'Solo Pro (Annual)',
+        // Add more price IDs as needed
+    ];
+    $planName = $planMap[$planProp] ?? (
+        str_contains(strtolower($planProp), 'agency') ? 'Agency Pro' :
+        (str_contains(strtolower($planProp), 'solo')  ? 'Solo Pro'   :
+        ($planProp && !str_starts_with($planProp, 'price_') ? $planProp : 'Paid Plan'))
+    );
+
+    // signup_date = subscription_start (date of purchase)
+    $signupDate = $row[4] ? substr($row[4], 0, 10) : 'unknown';
+
     return [
         'found'                  => true,
         'name'                   => $row[14] ?? '',
         'email'                  => $row[15] ?? $email,
 
         // Dates
-        'signup_date'            => $row[0]  ? substr($row[0], 0, 10)  : 'unknown',
+        'signup_date'            => $signupDate,
         'autobidder_setup_date'  => $row[1]  ? substr($row[1], 0, 10)  : 'never',
         'first_scanner_date'     => $row[2]  ? substr($row[2], 0, 10)  : 'never',
         'first_reply_date'       => $row[3]  ? substr($row[3], 0, 10)  : 'never',
@@ -110,7 +126,7 @@ function getPostHogUser(string $email): array {
         'gigs_searches'          => (int)($row[20] ?? 0),
 
         // Plan & payment
-        'plan'                   => $planProp ?: ($mrr > 0 ? 'paid' : 'free'),
+        'plan'                   => $planName,
         'total_paid_usd'         => $revenue,
         'mrr'                    => $mrr,
         'is_canceled'            => !empty($row[5]),
