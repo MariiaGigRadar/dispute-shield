@@ -2,11 +2,93 @@
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/app/db.php';
 require_once __DIR__ . '/app/posthog.php';
+require_once __DIR__ . '/app/evidence.php';
 
-if (($_GET['key'] ?? '') !== DASH_KEY) { http_response_code(403); exit('Forbidden'); }
+session_start();
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+$users = defined('DASH_USERS') ? DASH_USERS : [DASH_KEY => 'admin'];
+
+// Logout
+if (isset($_GET['logout'])) {
+    session_destroy();
+    header('Location: ?'); exit;
+}
+
+// Login attempt
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
+    $pwd = trim($_POST['password']);
+    if (isset($users[$pwd])) {
+        $_SESSION['gr_user'] = $users[$pwd];
+        $_SESSION['gr_pwd']  = $pwd;
+        header('Location: ?'); exit;
+    } else {
+        $loginError = 'Incorrect password. Try again.';
+    }
+}
+
+// Check session
+if (empty($_SESSION['gr_user'])) {
+    // Show login page
+    $err = $loginError ?? '';
+    echo <<<HTML
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DisputeShield — Login</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#020617;color:#e2e8f0;font-family:system-ui,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.box{background:#0a0f1e;border:1px solid #1e293b;border-radius:16px;padding:40px 36px;width:100%;max-width:380px;text-align:center}
+.logo{width:48px;height:48px;background:linear-gradient(135deg,#6366f1,#8b5cf6);border-radius:12px;display:grid;place-items:center;font-size:22px;margin:0 auto 20px}
+h1{font-size:18px;font-weight:800;color:#f1f5f9;margin-bottom:6px}
+p{font-size:12px;color:#475569;margin-bottom:28px}
+input{width:100%;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:11px 14px;color:#f1f5f9;font-size:14px;outline:none;margin-bottom:12px;transition:border .2s}
+input:focus{border-color:#6366f1}
+button{width:100%;padding:11px;background:#6366f1;border:none;color:#fff;border-radius:8px;cursor:pointer;font-weight:700;font-size:14px}
+button:hover{background:#4f46e5}
+.err{color:#f87171;font-size:12px;margin-bottom:12px}
+</style>
+</head>
+<body>
+<div class="box">
+  <div class="logo">⚡</div>
+  <h1>DisputeShield</h1>
+  <p>GigRadar internal tool</p>
+  '.($err ? '<div class=\'err\'>'.htmlspecialchars($err).'</div>' : '').'
+  <form method="POST">
+    <input type="password" name="password" placeholder="Enter your password" autofocus>
+    <button type="submit">Sign In</button>
+  </form>
+</div>
+</body></html>
+HTML;
+    exit;
+}
+
+$currentUser = $_SESSION['gr_user'];
 
 $db     = getDb();
 $action = $_GET['action'] ?? 'list';
+
+// ── PDF download action ────────────────────────────────────────────────────
+if ($action === 'pdf') {
+    require_once __DIR__ . '/app/pdf.php';
+    $email  = trim($_GET['email'] ?? '');
+    $reason = trim($_GET['reason'] ?? 'fraudulent');
+    $dispId = trim($_GET['dispute_id'] ?? '');
+    if (!$email) { http_response_code(400); exit('No email'); }
+    $u    = getPostHogUser($email);
+    $path = generateDisputePDF($u, $email, $reason, $dispId);
+    $fname = basename($path);
+    header('Content-Type: application/pdf');
+    header('Content-Disposition: attachment; filename="' . $fname . '"');
+    header('Content-Length: ' . filesize($path));
+    readfile($path);
+    @unlink($path);
+    exit;
+}
 
 if ($action === 'preview') {
     header('Content-Type: application/json');
@@ -322,6 +404,11 @@ pre.pbody.int-pre{color:#475569;font-size:11px}
     <div style="font-weight:800;font-size:14px;color:#f1f5f9">DisputeShield</div>
     <div style="font-size:10px;color:#475569;font-family:monospace">GigRadar · PostHog evidence</div>
   </div>
+  <div style="flex:1"></div>
+  <div style="display:flex;align-items:center;gap:12px">
+    <span style="font-size:12px;color:#475569">👤 <?=htmlspecialchars($currentUser)?></span>
+    <a href="?logout=1" style="padding:5px 12px;border:1px solid #334155;border-radius:6px;color:#64748b;font-size:11px;font-weight:600;text-decoration:none">Sign out</a>
+  </div>
 </div>
 
 <div class="wrap">
@@ -377,7 +464,12 @@ pre.pbody.int-pre{color:#475569;font-size:11px}
         <td style="font-family:monospace;font-size:11px"><?=str_replace('_',' ',$r['reason']??'')?></td>
         <td><span class="b <?=$bc?>"><?=$bl?></span></td>
         <td><?=!empty($ev['access_activity_log'])?'<span style="color:#10b981;font-size:12px">✓ done</span>':'<span style="color:#f59e0b;font-size:12px">○ pending</span>'?></td>
-        <td><a class="abtn" href="https://dashboard.stripe.com/disputes/<?=htmlspecialchars($r['dispute_id'])?>" target="_blank">Stripe ↗</a></td>
+        <td style="white-space:nowrap;display:flex;gap:5px;align-items:center">
+          <a class="abtn" href="https://dashboard.stripe.com/disputes/<?=htmlspecialchars($r['dispute_id'])?>" target="_blank">Stripe ↗</a>
+          <a class="abtn" style="color:#818cf8;border-color:#4f46e533"
+             href="?key=<?=$key?>&action=pdf&email=<?=urlencode($r['email']??'')?>&reason=<?=urlencode($r['reason']??'fraudulent')?>&dispute_id=<?=urlencode($r['dispute_id']??'')?>"
+             title="Download PDF evidence packet">PDF ↓</a>
+        </td>
       </tr>
       <?php endforeach;?>
       <?php if(empty($rows)):?>
