@@ -112,7 +112,70 @@ if ($action === 'preview') {
     header('Content-Type: application/json');
     $email = trim($_POST['email'] ?? '');
     if (!$email) { echo json_encode(['error' => 'No email']); exit; }
+
     $u = getPostHogUser($email);
+
+    // Pull real amount paid from Stripe if key available
+    if (STRIPE_SECRET_KEY && ($u['found'] ?? false)) {
+        try {
+            \Stripe\Stripe::setApiKey(STRIPE_SECRET_KEY);
+            // Search charges by email
+            $charges = \Stripe\Charge::search([
+                'query' => 'status:"succeeded"',
+                'limit' => 100,
+            ]);
+            $totalPaid = 0;
+            foreach ($charges->data as $ch) {
+                if (strtolower($ch->billing_details->email ?? '') === strtolower($email)
+                    || strtolower($ch->metadata['email'] ?? '') === strtolower($email)) {
+                    if (!$ch->refunded) {
+                        $totalPaid += $ch->amount;
+                    }
+                }
+            }
+            // Also try customer lookup
+            if ($totalPaid === 0) {
+                $customers = \Stripe\Customer::search(['query' => 'email:"' . $email . '"']);
+                foreach ($customers->data as $cust) {
+                    $custCharges = \Stripe\Charge::all(['customer' => $cust->id, 'limit' => 100]);
+                    foreach ($custCharges->data as $ch) {
+                        if ($ch->status === 'succeeded' && !$ch->refunded) {
+                            $totalPaid += $ch->amount;
+                        }
+                    }
+                }
+            }
+            if ($totalPaid > 0) {
+                $u['total_paid_usd'] = number_format($totalPaid / 100, 2);
+            }
+
+            // Get plan name from subscription
+            $customers = \Stripe\Customer::search(['query' => 'email:"' . $email . '"']);
+            foreach ($customers->data as $cust) {
+                $subs = \Stripe\Subscription::all(['customer' => $cust->id, 'limit' => 1]);
+                foreach ($subs->data as $sub) {
+                    $priceId   = $sub->items->data[0]->price->id ?? '';
+                    $interval  = $sub->items->data[0]->price->recurring->interval ?? '';
+                    $prodId    = $sub->items->data[0]->price->product ?? '';
+                    try {
+                        $prod = \Stripe\Product::retrieve($prodId);
+                        $prodName = $prod->name ?? '';
+                    } catch (\Exception $e) { $prodName = ''; }
+                    if ($prodName) {
+                        $u['plan'] = $prodName . ($interval ? ' (' . ucfirst($interval) . 'ly)' : '');
+                    }
+                    // signup = subscription start from Stripe
+                    if ($sub->start_date) {
+                        $u['signup_date']        = date('Y-m-d', $sub->start_date);
+                        $u['subscription_start'] = date('Y-m-d', $sub->start_date);
+                    }
+                }
+            }
+        } catch (\Exception $e) {
+            // Stripe unavailable — use PostHog data
+        }
+    }
+
     echo json_encode([
         'user'         => $u,
         'stripe_text'  => buildStripeText($u, $email),
