@@ -5,61 +5,138 @@ require_once __DIR__ . '/app/posthog.php';
 require_once __DIR__ . '/app/evidence.php';
 
 session_start();
+require_once __DIR__ . '/app/auth.php';
 
-// ── Auth ──────────────────────────────────────────────────────────────────────
-$users = defined('DASH_USERS') ? DASH_USERS : [DASH_KEY => 'admin'];
+// ── Auth (email OTP) ──────────────────────────────────────────────────────────
 
 // Logout
 if (isset($_GET['logout'])) {
     session_destroy();
-    header('Location: ?'); exit;
+    header('Location: /');
+    exit;
 }
 
-// Login attempt
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
-    $pwd = trim($_POST['password']);
-    if (isset($users[$pwd])) {
-        $_SESSION['gr_user'] = $users[$pwd];
-        $_SESSION['gr_pwd']  = $pwd;
-        header('Location: ?'); exit;
-    } else {
-        $loginError = 'Incorrect password. Try again.';
+$authStep  = $_SESSION['auth_step']  ?? 'email';  // 'email' | 'code'
+$authEmail = $_SESSION['auth_email'] ?? '';
+$authError = '';
+
+// Handle form submissions
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $formStep = $_POST['step'] ?? 'email';
+
+    // Step 1 — user submitted their email
+    if ($formStep === 'email') {
+        $inputEmail = strtolower(trim($_POST['email'] ?? ''));
+        if (!filter_var($inputEmail, FILTER_VALIDATE_EMAIL)) {
+            $authError = 'Please enter a valid email address.';
+        } elseif (!isEmailAllowed($inputEmail)) {
+            $authError = 'This email is not authorized to access DisputeShield.';
+        } else {
+            $db2  = getDb();
+            $code = generateOtp($db2, $inputEmail);
+            $sent = sendOtpEmail($inputEmail, $code);
+            if ($sent) {
+                $_SESSION['auth_step']  = 'code';
+                $_SESSION['auth_email'] = $inputEmail;
+                header('Location: /');
+                exit;
+            } else {
+                $authError = 'Failed to send email. Check RESEND_API_KEY in Railway variables.';
+            }
+        }
+    }
+
+    // Step 2 — user submitted the OTP code
+    elseif ($formStep === 'code') {
+        $inputCode = trim(str_replace(' ', '', $_POST['code'] ?? ''));
+        $db2 = getDb();
+        if (verifyOtp($db2, $authEmail, $inputCode)) {
+            $_SESSION['gr_user']    = $authEmail;
+            $_SESSION['auth_step']  = 'done';
+            unset($_SESSION['auth_email']);
+            header('Location: /');
+            exit;
+        } else {
+            $authError = 'Invalid or expired code. Please try again.';
+        }
     }
 }
 
-// Check session
+// Show auth page if not logged in
 if (empty($_SESSION['gr_user'])) {
-    $err = $loginError ?? '';
-    $errHtml = $err ? '<div class="err">' . htmlspecialchars($err) . '</div>' : '';
+    $step  = $_SESSION['auth_step'] ?? 'email';
+    $email = htmlspecialchars($authEmail);
+    $err   = $authError;
     ?><!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>DisputeShield — Login</title>
+<title>DisputeShield — Sign In</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#020617;color:#e2e8f0;font-family:system-ui,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center}
-.box{background:#0a0f1e;border:1px solid #1e293b;border-radius:16px;padding:40px 36px;width:100%;max-width:380px;text-align:center}
-.logo{width:48px;height:48px;background:linear-gradient(135deg,#6366f1,#8b5cf6);border-radius:12px;display:grid;place-items:center;font-size:22px;margin:0 auto 20px}
-h1{font-size:18px;font-weight:800;color:#f1f5f9;margin-bottom:6px}
-p{font-size:12px;color:#475569;margin-bottom:28px}
-input{width:100%;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:11px 14px;color:#f1f5f9;font-size:14px;outline:none;margin-bottom:12px;transition:border .2s}
-input:focus{border-color:#6366f1}
-button{width:100%;padding:11px;background:#6366f1;border:none;color:#fff;border-radius:8px;cursor:pointer;font-weight:700;font-size:14px}
-button:hover{background:#4f46e5}
-.err{color:#f87171;font-size:12px;margin-bottom:12px;padding:8px;background:#1a0a0a;border-radius:6px}
+.box{background:#0a0f1e;border:1px solid #1e293b;border-radius:20px;padding:44px 40px;width:100%;max-width:400px;text-align:center}
+.logo{width:56px;height:56px;background:linear-gradient(135deg,#6366f1,#8b5cf6);border-radius:16px;display:grid;place-items:center;font-size:26px;margin:0 auto 20px;box-shadow:0 8px 32px #6366f140}
+h1{font-size:20px;font-weight:800;color:#f1f5f9;margin-bottom:6px}
+.sub{font-size:12px;color:#475569;margin-bottom:32px}
+.email-badge{background:#1e293b;border-radius:8px;padding:8px 14px;font-size:13px;color:#818cf8;margin-bottom:20px;display:inline-block}
+label{display:block;text-align:left;font-size:11px;font-weight:700;color:#475569;letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px}
+input{width:100%;background:#0f172a;border:1px solid #334155;border-radius:10px;padding:13px 16px;color:#f1f5f9;font-size:15px;outline:none;margin-bottom:14px;transition:border .2s;text-align:center;letter-spacing:.1em}
+input:focus{border-color:#6366f1;box-shadow:0 0 0 3px #6366f120}
+.btn{width:100%;padding:13px;background:#6366f1;border:none;color:#fff;border-radius:10px;cursor:pointer;font-weight:700;font-size:15px;transition:background .2s}
+.btn:hover{background:#4f46e5}
+.err{color:#f87171;font-size:12px;margin-bottom:14px;padding:10px 14px;background:#1a0505;border:1px solid #7f1d1d30;border-radius:8px;text-align:left}
+.hint{font-size:11px;color:#334155;margin-top:16px}
+.back{font-size:12px;color:#475569;margin-top:14px;display:block;cursor:pointer;text-decoration:underline;background:none;border:none}
+.dots{display:flex;gap:8px;justify-content:center;margin-bottom:28px}
+.dot{width:8px;height:8px;border-radius:50%;background:#1e293b}
+.dot.active{background:#6366f1}
 </style>
 </head>
 <body>
 <div class="box">
   <div class="logo">⚡</div>
   <h1>DisputeShield</h1>
-  <p>GigRadar internal tool</p>
-  <?= $errHtml ?>
-  <form method="POST">
-    <input type="password" name="password" placeholder="Enter your password" autofocus>
-    <button type="submit">Sign In</button>
-  </form>
+  <p class="sub">GigRadar internal tool</p>
+
+  <!-- Step indicator -->
+  <div class="dots">
+    <div class="dot <?= $step==='email' ? 'active' : '' ?>"></div>
+    <div class="dot <?= $step==='code'  ? 'active' : '' ?>"></div>
+  </div>
+
+  <?php if ($err): ?>
+    <div class="err">⚠ <?= htmlspecialchars($err) ?></div>
+  <?php endif; ?>
+
+  <?php if ($step === 'email'): ?>
+    <!-- STEP 1: Enter email -->
+    <form method="POST">
+      <input type="hidden" name="step" value="email">
+      <label>Your work email</label>
+      <input type="email" name="email" placeholder="you@gigradar.io" autofocus required>
+      <button class="btn" type="submit">Send login code →</button>
+    </form>
+    <p class="hint">We'll send a 6-digit code to your email.<br>Authorized: maria, vadym, antonina @gigradar.io</p>
+
+  <?php else: ?>
+    <!-- STEP 2: Enter OTP code -->
+    <p style="font-size:13px;color:#64748b;margin-bottom:10px">Code sent to:</p>
+    <span class="email-badge">📧 <?= $email ?></span>
+    <form method="POST">
+      <input type="hidden" name="step" value="code">
+      <label>6-digit code</label>
+      <input type="text" name="code" placeholder="000000" maxlength="6" pattern="[0-9]{6}"
+             autofocus autocomplete="one-time-code" required
+             oninput="this.value=this.value.replace(/\D/g,'')">
+      <button class="btn" type="submit">Sign in →</button>
+    </form>
+    <p class="hint">Code expires in 10 minutes.<br>Check your spam folder if not received.</p>
+    <form method="POST" style="margin-top:10px">
+      <input type="hidden" name="step" value="email">
+      <button class="back" type="submit">← Use a different email</button>
+    </form>
+  <?php endif; ?>
 </div>
 </body></html><?php
     exit;
