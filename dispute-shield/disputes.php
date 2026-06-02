@@ -3,6 +3,7 @@ require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/app/db.php';
 require_once __DIR__ . '/app/posthog.php';
 require_once __DIR__ . '/app/evidence.php';
+require_once __DIR__ . '/vendor/autoload.php';
 
 session_start();
 
@@ -358,17 +359,56 @@ function buildInternalLog(array $u, string $email): string {
     return implode("\n", $lines);
 }
 
-// Stats & table
-$total    = (int)$db->querySingle("SELECT count() FROM disputes");
-$pending  = (int)$db->querySingle("SELECT count() FROM disputes WHERE status IN ('needs_response','warning_needs_response')");
-$won      = (int)$db->querySingle("SELECT count() FROM disputes WHERE outcome='won'");
-$lost     = (int)$db->querySingle("SELECT count() FROM disputes WHERE outcome='lost'");
-$totalAmt = (float)($db->querySingle("SELECT sum(amount) FROM disputes") ?: 0) / 100;
-$rows = [];
-$res  = $db->query("SELECT * FROM disputes ORDER BY epoch_created DESC");
-while ($r = $res->fetchArray(SQLITE3_ASSOC)) $rows[] = $r;
-$key = DASH_KEY;
-?><!DOCTYPE html>
+// ── Pull disputes from Stripe live ───────────────────────────────────────────
+$stripeDisputes = [];
+$stripeError    = '';
+if (STRIPE_SECRET_KEY) {
+    try {
+        \Stripe\Stripe::setApiKey(STRIPE_SECRET_KEY);
+        $sd = \Stripe\Dispute::all(['limit' => 100, 'expand' => ['data.charge']]);
+        foreach ($sd->data as $d) {
+            // Get email from charge
+            $em = '';
+            try {
+                $ch = $d->charge;
+                if (is_object($ch)) {
+                    $em = $ch->billing_details->email ?? '';
+                    if (!$em && isset($ch->customer)) {
+                        $cu = is_string($ch->customer)
+                            ? \Stripe\Customer::retrieve($ch->customer)
+                            : $ch->customer;
+                        $em = $cu->email ?? '';
+                    }
+                }
+            } catch(\Exception $e) {}
+
+            // Upsert into local SQLite
+            upsertDispute($db, $d, $em);
+
+            $stripeDisputes[] = [
+                'id'      => $d->id,
+                'email'   => $em,
+                'amount'  => $d->amount,
+                'reason'  => $d->reason,
+                'status'  => $d->status,
+                'created' => $d->created,
+            ];
+        }
+    } catch (\Exception $e) {
+        $stripeError = $e->getMessage();
+    }
+}
+
+// Stats from Stripe data
+$total   = count($stripeDisputes);
+$pending = count(array_filter($stripeDisputes, fn($r) => in_array($r['status'], ['needs_response','warning_needs_response'])));
+$won     = count(array_filter($stripeDisputes, fn($r) => $r['status'] === 'won'));
+$lost    = count(array_filter($stripeDisputes, fn($r) => $r['status'] === 'lost'));
+$totalAmt= array_sum(array_column($stripeDisputes, 'amount')) / 100;
+
+// Sort newest first
+usort($stripeDisputes, fn($a,$b) => $b['created'] - $a['created']);
+?>?><!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -462,36 +502,76 @@ pre.pbody.int-pre{color:#475569;font-size:11px}
     </div>
   </div>
 
+  <?php if($stripeError): ?>
+  <div style="background:#1a0505;border:1px solid #7f1d1d;border-radius:8px;padding:12px 18px;margin-bottom:16px;color:#f87171;font-size:13px">
+    ⚠ Stripe error: <?=htmlspecialchars($stripeError)?><br>
+    <small style="color:#64748b">Make sure STRIPE_SECRET_KEY is set in Railway Variables.</small>
+  </div>
+  <?php endif; ?>
+
   <div class="card">
-    <div class="ch">All Disputes (<?=count($rows)?>)</div>
+    <div class="ch">All Disputes (<?=$total?>)
+      <?php if($pending > 0): ?>
+        <span style="margin-left:8px;background:#f59e0b;color:#000;font-size:10px;padding:2px 8px;border-radius:4px;font-weight:700"><?=$pending?> NEED RESPONSE</span>
+      <?php endif; ?>
+    </div>
     <table>
-      <thead><tr><th>Date</th><th>Email</th><th>Amount</th><th>Reason</th><th>Status</th><th>Evidence</th><th></th></tr></thead>
+      <thead><tr><th>Date</th><th>Email</th><th>Amount</th><th>Reason</th><th>Status</th><th colspan="2">Actions</th></tr></thead>
       <tbody>
-      <?php foreach($rows as $r):
-        $bc=match($r['status']){'needs_response'=>'bw','warning_needs_response'=>'bu','under_review'=>'br','won'=>'bg','lost'=>'bl',default=>'bc'};
-        $bl=match($r['status']){'needs_response'=>'Needs Response','warning_needs_response'=>'URGENT','under_review'=>'Review','won'=>'Won ✓','lost'=>'Lost ✗',default=>$r['status']};
-        $ev=json_decode($r['evidence_json']??'{}',true);
-        $date=$r['epoch_created']?date('Y-m-d',$r['epoch_created']):'—';
-        $amt='$'.number_format($r['amount']/100,2);
+      <?php foreach($stripeDisputes as $r):
+        $st = $r['status'];
+        $bc = match($st) {
+            'needs_response'         => 'bw',
+            'warning_needs_response' => 'bu',
+            'under_review'           => 'br',
+            'won'                    => 'bg',
+            'lost'                   => 'bl',
+            default                  => 'bc'
+        };
+        $bl = match($st) {
+            'needs_response'         => '⚡ Needs Response',
+            'warning_needs_response' => '🚨 URGENT',
+            'under_review'           => '🔍 Under Review',
+            'won'                    => '✅ Won',
+            'lost'                   => '❌ Lost',
+            default                  => $st
+        };
+        $isActive = in_array($st, ['needs_response','warning_needs_response']);
+        $date = date('Y-m-d', $r['created']);
+        $amt  = '$'.number_format($r['amount']/100,2);
+        $em   = $r['email'] ?: '—';
       ?>
-      <tr>
+      <tr style="<?=$isActive ? 'background:#0f1a0a40;' : ''?>">
         <td style="font-family:monospace;color:#64748b;white-space:nowrap"><?=$date?></td>
-        <td style="color:#94a3b8"><?=htmlspecialchars($r['email']??'—')?></td>
+        <td style="color:#94a3b8"><?=htmlspecialchars($em)?></td>
         <td style="font-family:monospace;color:#f1f5f9;font-weight:700"><?=$amt?></td>
-        <td style="font-family:monospace;font-size:11px"><?=str_replace('_',' ',$r['reason']??'')?></td>
+        <td style="font-family:monospace;font-size:11px;color:#94a3b8"><?=str_replace('_',' ',$r['reason'])?></td>
         <td><span class="b <?=$bc?>"><?=$bl?></span></td>
-        <td><?=!empty($ev['access_activity_log'])?'<span style="color:#10b981;font-size:12px">✓ done</span>':'<span style="color:#f59e0b;font-size:12px">○ pending</span>'?></td>
-        <td style="white-space:nowrap;display:flex;gap:5px;align-items:center">
-          <a class="abtn" href="https://dashboard.stripe.com/disputes/<?=htmlspecialchars($r['dispute_id'])?>" target="_blank">Stripe ↗</a>
-          <a class="abtn" style="color:#818cf8;border-color:#4f46e533"
-             href="?key=<?=$key?>&action=pdf&email=<?=urlencode($r['email']??'')?>&reason=<?=urlencode($r['reason']??'fraudulent')?>&dispute_id=<?=urlencode($r['dispute_id']??'')?>"
-             title="Download PDF evidence packet">PDF ↓</a>
+        <td>
+          <?php if($isActive && $em !== '—'): ?>
+          <button class="go" style="padding:5px 14px;font-size:12px"
+            onclick="document.getElementById('em').value='<?=htmlspecialchars($em,ENT_QUOTES)?>'; document.getElementById('panels').style.display='none'; run(); window.scrollTo(0,0)">
+            Generate Evidence
+          </button>
+          <?php else: ?>
+          <span style="color:#334155;font-size:11px">—</span>
+          <?php endif; ?>
+        </td>
+        <td style="white-space:nowrap">
+          <a class="abtn" href="https://dashboard.stripe.com/disputes/<?=htmlspecialchars($r['id'])?>" target="_blank">Stripe ↗</a>
+          <?php if($em !== '—'): ?>
+          <a class="abtn" style="color:#818cf8;border-color:#4f46e533;margin-left:4px"
+             href="?action=pdf&email=<?=urlencode($em)?>&reason=<?=urlencode($r['reason'])?>&dispute_id=<?=urlencode($r['id'])?>"
+             title="Download PDF">PDF ↓</a>
+          <?php endif; ?>
         </td>
       </tr>
-      <?php endforeach;?>
-      <?php if(empty($rows)):?>
-      <tr><td colspan="7" style="text-align:center;color:#475569;padding:32px;font-size:13px">No disputes yet — they appear automatically when Stripe sends a webhook.</td></tr>
-      <?php endif;?>
+      <?php endforeach; ?>
+      <?php if(empty($stripeDisputes)): ?>
+      <tr><td colspan="7" style="text-align:center;color:#475569;padding:32px;font-size:13px">
+        <?= STRIPE_SECRET_KEY ? 'No disputes found in Stripe.' : '⚠ Add STRIPE_SECRET_KEY to Railway Variables to load disputes.' ?>
+      </td></tr>
+      <?php endif; ?>
       </tbody>
     </table>
   </div>
