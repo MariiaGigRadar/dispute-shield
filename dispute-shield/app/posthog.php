@@ -28,7 +28,7 @@ function getPostHogUser(string $email): array {
             min(if(event='subscription_active', timestamp, null))            AS subscription_start,
             max(if(event='subscription_canceled', timestamp, null))          AS subscription_canceled,
             countIf(event='auto_bid_reply_received')                         AS total_replies,
-            countIf(event='usage_recorded')                                  AS proposals_sent,
+            countIf(event='team_proposal_sent')                             AS proposals_sent,
             countIf(event='scanner_created')                                 AS scanners_created,
             countIf(event='auto_bidder_disabled_no_connects')               AS no_connects_events,
             countIf(event='auto_bidder_configured')                          AS autobidder_configs,
