@@ -3,6 +3,7 @@ require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/app/db.php';
 require_once __DIR__ . '/app/posthog.php';
 require_once __DIR__ . '/app/evidence.php';
+require_once __DIR__ . '/app/intercom.php';
 require_once __DIR__ . '/vendor/autoload.php';
 
 session_start();
@@ -93,13 +94,59 @@ $action = $_GET['action'] ?? 'list';
 // ── PDF download action ────────────────────────────────────────────────────
 if ($action === 'pdf') {
     require_once __DIR__ . '/app/pdf.php';
+    require_once __DIR__ . '/app/evidence.php';
+    require_once __DIR__ . '/app/intercom.php';
     $email  = trim($_GET['email'] ?? '');
     $reason = trim($_GET['reason'] ?? 'fraudulent');
-    $dispId = trim($_GET['dispute_id'] ?? '');
     if (!$email) { http_response_code(400); exit('No email'); }
-    $u    = getPostHogUser($email);
-    $path = generateDisputePDF($u, $email, $reason, $dispId);
-    $fname = basename($path);
+
+    // Pull all data
+    $u = getPostHogUser($email);
+
+    // Stripe enrichment
+    if (STRIPE_SECRET_KEY && ($u['found'] ?? false)) {
+        try {
+            \Stripe\Stripe::setApiKey(STRIPE_SECRET_KEY);
+            $stripeCustomers = \Stripe\Customer::search(['query' => 'email:"' . $email . '"']);
+            foreach ($stripeCustomers->data as $cust) {
+                $subs = \Stripe\Subscription::all(['customer' => $cust->id, 'limit' => 1, 'status' => 'all']);
+                foreach ($subs->data as $sub) {
+                    $interval = $sub->items->data[0]->price->recurring->interval ?? '';
+                    $prodId   = $sub->items->data[0]->price->product ?? '';
+                    try { $prod = \Stripe\Product::retrieve($prodId); $u['plan'] = $prod->name . ($interval ? ' (' . ucfirst($interval) . 'ly)' : ''); } catch (\Exception $e) {}
+                    if ($sub->start_date) { $u['signup_date'] = date('Y-m-d', $sub->start_date); $u['subscription_start'] = date('Y-m-d', $sub->start_date); }
+                }
+                $allCharges = \Stripe\Charge::all(['customer' => $cust->id, 'limit' => 100]);
+                $total = 0; $prior = [];
+                foreach ($allCharges->data as $ch) {
+                    if ($ch->status === 'succeeded' && !$ch->refunded) $total += $ch->amount;
+                    if ($ch->status === 'succeeded' && empty($ch->dispute)) $prior[] = ['date' => date('Y-m-d', $ch->created), 'amount' => number_format($ch->amount/100,2), 'id' => $ch->id];
+                    if (!isset($u['card_last4']) && $ch->status === 'succeeded') {
+                        $ba = $ch->billing_details->address ?? null;
+                        if ($ba) { $u['billing_address'] = implode(', ', array_filter([$ba->line1??'',$ba->city??'',$ba->postal_code??'',$ba->country??''])); }
+                        $checks = $ch->payment_method_details->card->checks ?? null;
+                        if ($checks) { $u['avs_result'] = $checks->address_postal_code_check??''; $u['cvc_result'] = $checks->cvc_check??''; }
+                        $card = $ch->payment_method_details->card ?? null;
+                        if ($card) { $u['card_last4'] = $card->last4??''; $u['card_brand'] = $card->brand??''; }
+                    }
+                }
+                if ($total > 0) $u['total_paid_usd'] = number_format($total/100, 2);
+                if (count($prior) > 1) $u['prior_transactions'] = array_slice($prior, 1, 5);
+            }
+        } catch (\Exception $e) {}
+    }
+
+    // Intercom
+    $intercom    = getIntercomData($email);
+    $intercomLog = $intercom['summary'] ?? '';
+
+    // Build evidence texts
+    $rebuttalText = buildRebuttalLetter($u, $email, $reason);
+    $activityLog  = buildActivityLog($u, $email);
+
+    // Generate PDF
+    $path  = generateDisputePDF($email, $reason, $u, $rebuttalText, $activityLog, $intercomLog);
+    $fname = 'GigRadar_Dispute_' . preg_replace('/[^a-z0-9]/i', '_', $email) . '_' . date('Ymd') . '.pdf';
     header('Content-Type: application/pdf');
     header('Content-Disposition: attachment; filename="' . $fname . '"');
     header('Content-Length: ' . filesize($path));
@@ -149,12 +196,12 @@ if ($action === 'preview') {
                 $u['total_paid_usd'] = number_format($totalPaid / 100, 2);
             }
 
-            // Get plan name from subscription
-            $customers = \Stripe\Customer::search(['query' => 'email:"' . $email . '"']);
-            foreach ($customers->data as $cust) {
-                $subs = \Stripe\Subscription::all(['customer' => $cust->id, 'limit' => 1]);
+            // Get plan, IP, billing address, AVS/CVC from Stripe
+            $stripeCustomers = \Stripe\Customer::search(['query' => 'email:"' . $email . '"']);
+            foreach ($stripeCustomers->data as $cust) {
+                // Subscriptions — plan name + signup date
+                $subs = \Stripe\Subscription::all(['customer' => $cust->id, 'limit' => 1, 'status' => 'all']);
                 foreach ($subs->data as $sub) {
-                    $priceId   = $sub->items->data[0]->price->id ?? '';
                     $interval  = $sub->items->data[0]->price->recurring->interval ?? '';
                     $prodId    = $sub->items->data[0]->price->product ?? '';
                     try {
@@ -164,11 +211,70 @@ if ($action === 'preview') {
                     if ($prodName) {
                         $u['plan'] = $prodName . ($interval ? ' (' . ucfirst($interval) . 'ly)' : '');
                     }
-                    // signup = subscription start from Stripe
                     if ($sub->start_date) {
                         $u['signup_date']        = date('Y-m-d', $sub->start_date);
                         $u['subscription_start'] = date('Y-m-d', $sub->start_date);
                     }
+                }
+
+                // All charges — get IP, billing address, AVS/CVC, prior transactions
+                $allCharges = \Stripe\Charge::all(['customer' => $cust->id, 'limit' => 100, 'expand' => ['data.payment_method_details']]);
+                $priorTransactions = [];
+                $totalPaidFromInvoices = 0;
+
+                foreach ($allCharges->data as $ch) {
+                    if ($ch->status === 'succeeded' && !$ch->refunded) {
+                        $totalPaidFromInvoices += $ch->amount;
+                    }
+
+                    // Get IP from most recent succeeded charge
+                    if (!isset($u['customer_purchase_ip']) && $ch->status === 'succeeded') {
+                        // IP can be in metadata or in payment_intent
+                        if (!empty($ch->metadata['ip_address'])) {
+                            $u['customer_purchase_ip'] = $ch->metadata['ip_address'];
+                        }
+                        // Billing address from charge
+                        $ba = $ch->billing_details->address ?? null;
+                        if ($ba && !isset($u['billing_address'])) {
+                            $parts = array_filter([
+                                $ba->line1 ?? '', $ba->line2 ?? '',
+                                $ba->city ?? '', $ba->state ?? '',
+                                $ba->postal_code ?? '', $ba->country ?? ''
+                            ]);
+                            $u['billing_address'] = implode(', ', $parts);
+                        }
+                        // AVS / CVC checks
+                        $checks = $ch->payment_method_details->card->checks ?? null;
+                        if ($checks && !isset($u['avs_result'])) {
+                            $u['avs_result']  = $checks->address_postal_code_check ?? 'unknown';
+                            $u['cvc_result']  = $checks->cvc_check ?? 'unknown';
+                            $u['avs_address'] = $checks->address_line1_check ?? 'unknown';
+                        }
+                        // Card last4 / brand
+                        $card = $ch->payment_method_details->card ?? null;
+                        if ($card && !isset($u['card_last4'])) {
+                            $u['card_last4'] = $card->last4 ?? '';
+                            $u['card_brand'] = $card->brand ?? '';
+                            $u['card_exp']   = ($card->exp_month ?? '') . '/' . ($card->exp_year ?? '');
+                        }
+                    }
+
+                    // Prior undisputed transactions for Visa CE 3.0
+                    if ($ch->status === 'succeeded' && empty($ch->dispute)) {
+                        $priorTransactions[] = [
+                            'date'   => date('Y-m-d', $ch->created),
+                            'amount' => number_format($ch->amount / 100, 2),
+                            'id'     => $ch->id,
+                        ];
+                    }
+                }
+
+                if ($totalPaidFromInvoices > 0) {
+                    $u['total_paid_usd'] = number_format($totalPaidFromInvoices / 100, 2);
+                }
+                // Prior transactions for CE 3.0 (exclude most recent = disputed one)
+                if (count($priorTransactions) > 1) {
+                    $u['prior_transactions'] = array_slice($priorTransactions, 1, 5);
                 }
             }
         } catch (\Exception $e) {
@@ -176,10 +282,65 @@ if ($action === 'preview') {
         }
     }
 
+    // Pull Intercom communications
+    $intercom = getIntercomData($email);
+
+    // If Intercom has stripe_id and we don't have a charge yet, use Intercom's data
+    if (!empty($intercom['stripe_id']) && STRIPE_SECRET_KEY && ($u['total_paid_usd'] ?? 0) == 0) {
+        try {
+            \Stripe\Stripe::setApiKey(STRIPE_SECRET_KEY);
+            $cust = \Stripe\Customer::retrieve($intercom['stripe_id']);
+            $custCharges = \Stripe\Charge::all(['customer' => $cust->id, 'limit' => 100]);
+            $totalFromIC = 0;
+            $priorTxIC = [];
+            foreach ($custCharges->data as $ch) {
+                if ($ch->status === 'succeeded' && !$ch->refunded) {
+                    $totalFromIC += $ch->amount;
+                    if (empty($ch->dispute)) {
+                        $priorTxIC[] = [
+                            'date'   => date('Y-m-d', $ch->created),
+                            'amount' => number_format($ch->amount / 100, 2),
+                            'id'     => $ch->id,
+                        ];
+                    }
+                }
+                if (!isset($u['customer_purchase_ip']) && $ch->status === 'succeeded') {
+                    $ba = $ch->billing_details->address ?? null;
+                    if ($ba) {
+                        $parts = array_filter([$ba->line1 ?? '', $ba->city ?? '', $ba->postal_code ?? '', $ba->country ?? '']);
+                        $u['billing_address'] = implode(', ', $parts);
+                    }
+                    $checks = $ch->payment_method_details->card->checks ?? null;
+                    if ($checks) {
+                        $u['avs_result']  = $checks->address_postal_code_check ?? 'unknown';
+                        $u['cvc_result']  = $checks->cvc_check ?? 'unknown';
+                        $u['avs_address'] = $checks->address_line1_check ?? 'unknown';
+                    }
+                    $card = $ch->payment_method_details->card ?? null;
+                    if ($card) {
+                        $u['card_last4'] = $card->last4 ?? '';
+                        $u['card_brand'] = $card->brand ?? '';
+                        $u['card_exp']   = ($card->exp_month ?? '') . '/' . ($card->exp_year ?? '');
+                    }
+                }
+            }
+            if ($totalFromIC > 0) $u['total_paid_usd'] = number_format($totalFromIC / 100, 2);
+            if (count($priorTxIC) > 1) $u['prior_transactions'] = array_slice($priorTxIC, 1, 5);
+        } catch (\Exception $e) {}
+    }
+
+    // Merge Intercom geo into user data if PostHog didn't have it
+    if (empty($u['geo_country']) && !empty($intercom['location']['country'])) {
+        $u['geo_country'] = $intercom['location']['country'];
+        $u['geo_city']    = $intercom['location']['city'] ?? '';
+    }
+
     echo json_encode([
-        'user'         => $u,
-        'stripe_text'  => buildStripeText($u, $email),
-        'internal_log' => buildInternalLog($u, $email),
+        'user'          => $u,
+        'intercom'      => $intercom,
+        'stripe_text'   => buildStripeText($u, $email),
+        'internal_log'  => buildInternalLog($u, $email),
+        'intercom_log'  => $intercom['summary'] ?? '',
     ]);
     exit;
 }
@@ -505,7 +666,7 @@ input[type=email]:focus{border-color:#6366f1}
 .go{padding:8px 22px;background:#6366f1;border:none;color:#fff;border-radius:8px;cursor:pointer;font-weight:700;font-size:13px;transition:opacity .2s}
 .go:disabled{opacity:.4;cursor:wait}
 #status{font-size:12px;color:#475569}
-.panels{display:none;margin:0 18px 18px;gap:14px;grid-template-columns:1fr 1fr}
+.panels{display:none;margin:0 18px 18px;gap:12px;grid-template-columns:1fr 1fr 1fr}
 .panel{border-radius:10px;overflow:hidden;border:1px solid #1e293b;display:flex;flex-direction:column}
 .phdr{padding:10px 14px;display:flex;align-items:center;justify-content:space-between;font-size:11px;font-weight:700;letter-spacing:.04em;flex-shrink:0}
 .phdr.stripe{background:#0f2942;color:#7dd3fc;border-bottom:1px solid #1e4070}
@@ -547,23 +708,30 @@ pre.pbody.int-pre{color:#475569;font-size:11px}
       <button class="go" id="gobtn" onclick="run()">Generate Evidence</button>
       <span id="status"></span>
     </div>
-    <div class="panels" id="panels" style="display:none;grid-template-columns:1fr 1fr">
+    <div class="panels" id="panels" style="display:none;grid-template-columns:1fr 1fr 1fr">
       <div class="panel">
         <div class="phdr stripe">
-          📄 FOR STRIPE — paste this into the dispute form
+          📄 FOR STRIPE — rebuttal letter
           <button class="copybtn" onclick="doCopy('st',this)">Copy</button>
         </div>
         <pre class="pbody stripe-pre" id="st"></pre>
       </div>
       <div class="panel">
         <div class="phdr internal">
-          🔒 INTERNAL LOG — your team only
+          📊 ACTIVITY LOG — PostHog
           <button class="copybtn" onclick="doCopy('il',this)">Copy</button>
         </div>
         <pre class="pbody int-pre" id="il"></pre>
       </div>
+      <div class="panel" style="border-color:#6B4FBB">
+        <div class="phdr" style="background:#2d1b6922;color:#a78bfa;border-bottom:1px solid #6B4FBB55">
+          💬 INTERCOM — customer communications
+          <button class="copybtn" onclick="doCopy('icl',this)">Copy</button>
+        </div>
+        <pre class="pbody" id="icl" style="background:#0f0a1e"></pre>
+      </div>
     </div>
-  </div>
+  </div>div>
 
   <?php if($stripeError): ?>
   <div style="background:#1a0505;border:1px solid #7f1d1d;border-radius:8px;padding:12px 18px;margin-bottom:16px;color:#f87171;font-size:13px">
@@ -652,8 +820,9 @@ async function run() {
     const fd = new FormData(); fd.append('email', em);
     const res  = await fetch('?key=<?=$key?>&action=preview', {method:'POST',body:fd});
     const data = await res.json();
-    document.getElementById('st').textContent = data.stripe_text  || '—';
-    document.getElementById('il').textContent = data.internal_log || '—';
+    document.getElementById('st').textContent  = data.stripe_text  || '—';
+    document.getElementById('il').textContent  = data.internal_log || '—';
+    document.getElementById('icl').textContent = data.intercom_log || (data.intercom && !data.intercom.found ? '⚠ Not in Intercom' : '—');
     const panels = document.getElementById('panels');
     panels.style.display = 'grid';
     if (data.user?.found) {
