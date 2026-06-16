@@ -177,39 +177,56 @@ $stripeError = null;
 if (STRIPE_SECRET_KEY) {
     try {
         \Stripe\Stripe::setApiKey(STRIPE_SECRET_KEY);
-        $list = \Stripe\Dispute::all(['limit' => 100]);
-        foreach ($list->data as $d) {
-            $em    = '';
-            $chAmt = $d->amount;
 
+        // Step 1: get all disputes
+        $rawList = \Stripe\Dispute::all(['limit' => 100]);
+
+        // Step 2: collect all charge IDs and fetch charges in one expand call
+        $chargeIds = array_map(fn($d) => $d->charge, $rawList->data);
+        $chargeIds = array_unique(array_filter($chargeIds));
+
+        // Build charge→email map by fetching each charge with customer expand
+        // Use a cache to avoid duplicate requests for same customer
+        $custEmailCache = [];
+        $chargeEmailMap = [];
+        foreach ($chargeIds as $chId) {
             try {
-                $ch = \Stripe\Charge::retrieve([
-                    'id'     => $d->charge,
-                    'expand' => ['customer'],
-                ]);
-                // Source 1: billing_details.email
+                $ch = \Stripe\Charge::retrieve(['id' => $chId, 'expand' => ['customer']]);
+                $em = '';
+                // billing_details.email
                 $em = $ch->billing_details->email ?? '';
-                // Source 2: expanded customer object
+                // customer.email (expanded or string ID)
                 if (!$em) {
                     $cust = $ch->customer ?? null;
                     if (is_object($cust) && !empty($cust->email)) {
                         $em = $cust->email;
+                        $custEmailCache[$cust->id] = $em;
                     } elseif (is_string($cust) && $cust) {
-                        try {
-                            $cObj = \Stripe\Customer::retrieve($cust);
-                            $em   = $cObj->email ?? '';
-                        } catch (\Exception $e2) {}
+                        if (isset($custEmailCache[$cust])) {
+                            $em = $custEmailCache[$cust];
+                        } else {
+                            try {
+                                $cObj = \Stripe\Customer::retrieve($cust);
+                                $em = $cObj->email ?? '';
+                                $custEmailCache[$cust] = $em;
+                            } catch (\Exception $e2) {}
+                        }
                     }
                 }
-                // Source 3: receipt_email
-                if (!$em && !empty($ch->receipt_email)) {
-                    $em = $ch->receipt_email;
-                }
-                // Source 4: metadata
-                if (!$em && !empty($ch->metadata['email'])) {
-                    $em = $ch->metadata['email'];
-                }
-            } catch (\Exception $e) {}
+                // receipt_email
+                if (!$em && !empty($ch->receipt_email)) $em = $ch->receipt_email;
+                // metadata
+                if (!$em && !empty($ch->metadata['email'])) $em = $ch->metadata['email'];
+                $chargeEmailMap[$chId] = $em;
+            } catch (\Exception $e) {
+                $chargeEmailMap[$chId] = '';
+            }
+        }
+
+        // Step 3: build dispute rows using cached emails
+        foreach ($rawList->data as $d) {
+            $em    = $chargeEmailMap[$d->charge] ?? '';
+            $chAmt = $d->amount;
 
             $status = $d->status;
             $stats['total']++;
