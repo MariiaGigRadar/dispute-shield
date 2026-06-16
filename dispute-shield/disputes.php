@@ -1,9 +1,9 @@
 <?php
-require_once __DIR__ . '/vendor/autoload.php';
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/app/posthog.php';
 require_once __DIR__ . '/app/evidence.php';
 require_once __DIR__ . '/app/intercom.php';
+define('POSTHOG_PHP_VERSION', '2026-06-17-v2');
 
 session_start();
 
@@ -119,6 +119,36 @@ if ($action === 'pdf') {
 
     $intercom    = getIntercomData($email);
     $intercomLog = $intercom['summary'] ?? '';
+
+    // Fill missing fields from Intercom when PostHog has no data
+    if (!empty($intercom['found'])) {
+        if (empty($u['last_active']) || $u['last_active'] === 'unknown') {
+            $u['last_active'] = $intercom['last_seen_at'] ?? 'unknown';
+        }
+        if (empty($u['last_pageview']) || $u['last_pageview'] === 'unknown') {
+            $u['last_pageview'] = $intercom['last_seen_at'] ?? 'unknown';
+        }
+        if (empty($u['plan']) || $u['plan'] === 'Paid Plan') {
+            $u['plan'] = $intercom['stripe_plan'] ?? $u['plan'];
+        }
+        if (empty($u['geo_country'])) {
+            $u['geo_country'] = $intercom['location']['country'] ?? '';
+            $u['geo_city']    = $intercom['location']['city'] ?? '';
+        }
+        if (empty($u['stripe_subscription_status'])) {
+            $u['stripe_subscription_status'] = $intercom['stripe_status'] ?? '';
+        }
+        if (empty($u['card_brand'])) {
+            $u['card_brand'] = $intercom['stripe_card_brand'] ?? '';
+        }
+        // Mark as found so evidence functions work
+        if (!($u['found'] ?? false)) {
+            $u['found'] = true;
+            $u['name']  = $u['name'] ?: $email;
+            $u['email'] = $email;
+        }
+    }
+
     $rebuttal    = buildRebuttalLetter($u, $email, $reason);
     $activityLog = buildActivityLog($u, $email);
 
@@ -143,6 +173,15 @@ if ($action === 'preview') {
 
     $intercom    = getIntercomData($email);
     $intercomLog = $intercom['summary'] ?? '';
+
+    // Fill missing fields from Intercom
+    if (!empty($intercom['found'])) {
+        if (empty($u['last_active']) || $u['last_active'] === 'unknown') $u['last_active'] = $intercom['last_seen_at'] ?? 'unknown';
+        if (empty($u['plan']) || $u['plan'] === 'Paid Plan') $u['plan'] = $intercom['stripe_plan'] ?? $u['plan'];
+        if (empty($u['geo_country'])) { $u['geo_country'] = $intercom['location']['country'] ?? ''; $u['geo_city'] = $intercom['location']['city'] ?? ''; }
+        if (empty($u['stripe_subscription_status'])) $u['stripe_subscription_status'] = $intercom['stripe_status'] ?? '';
+        if (!($u['found'] ?? false)) { $u['found'] = true; $u['name'] = $u['name'] ?: $email; $u['email'] = $email; }
+    }
 
     echo json_encode([
         'user'         => $u,
@@ -294,6 +333,7 @@ tr:hover td{background:#0f1a2e}
   <?php if ($stripeError): ?>
     <div class="error-box">⚠ Stripe error: <?= htmlspecialchars($stripeError) ?></div>
   <?php endif; ?>
+  <div style="font-size:10px;color:#334155;text-align:right;margin-bottom:8px">posthog.php: <?= POSTHOG_PHP_VERSION ?></div>
 
   <!-- Stats -->
   <div class="stats-row">
