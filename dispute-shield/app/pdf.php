@@ -107,7 +107,8 @@ function generateDisputePDF(
     array  $user,
     string $rebuttalText,
     string $activityLog,
-    string $intercomLog = ''
+    string $intercomLog = '',
+    array  $intercom = []
 ): string {
 
     $pdf = new DisputePDF('P', 'mm', 'A4');
@@ -138,13 +139,41 @@ function generateDisputePDF(
     // ── Section 1: Transaction Facts ─────────────────────────────────────────
     $pdf->sectionTitle('1. Transaction Facts');
 
+    // Fallbacks from intercom if Stripe/PostHog missing
+    if (empty($user['last_active']) || $user['last_active'] === 'unknown') {
+        $user['last_active'] = $intercom['last_seen_at'] ?? 'unknown';
+    }
+    if (empty($user['plan'])) {
+        $user['plan'] = $intercom['stripe_plan'] ?? '';
+    }
+    if (empty($user['stripe_subscription_status'])) {
+        $user['stripe_subscription_status'] = $intercom['stripe_status'] ?? '';
+    }
+    if ((float)($user['total_paid_usd'] ?? 0) == 0 && !empty($intercom['stripe_last_charge'])) {
+        $user['total_paid_usd'] = $intercom['stripe_last_charge'];
+    }
+    if (empty($user['geo_country'])) {
+        $user['geo_country'] = $intercom['location']['country'] ?? '';
+        $user['geo_city']    = $intercom['location']['city'] ?? '';
+    }
+
     $plan   = $user['plan']          ?? 'GigRadar Subscription';
     $amount = $user['total_paid_usd'] ?? '0.00';
     $name   = $user['name']          ?: $email;
     $subStart  = $user['subscription_start'] ?? $user['signup_date'] ?? 'unknown';
-    $subStatus = ($user['is_canceled'] ?? false)
-                  ? 'Canceled ' . ($user['subscription_canceled'] ?? '')
-                  : 'ACTIVE';
+    // Subscription status — prefer Stripe real status
+    $stripeStatus = strtolower($user['stripe_subscription_status'] ?? '');
+    if (in_array($stripeStatus, ['canceled', 'cancelled'])) {
+        $subStatus = 'CANCELED (confirmed via Stripe)';
+    } elseif ($stripeStatus === 'trialing') {
+        $subStatus = 'Trialing';
+    } elseif ($stripeStatus && $stripeStatus !== 'active') {
+        $subStatus = strtoupper($stripeStatus);
+    } elseif ($user['is_canceled'] ?? false) {
+        $subStatus = 'Canceled ' . ($user['subscription_canceled'] ?? '');
+    } else {
+        $subStatus = 'ACTIVE';
+    }
     $lastActive = $user['last_active'] ?? $user['last_pageview'] ?? 'unknown';
 
     $pdf->row('Merchant',            'GigRadar (gigradar.io) | support@gigradar.io');
