@@ -178,52 +178,56 @@ if (STRIPE_SECRET_KEY) {
     try {
         \Stripe\Stripe::setApiKey(STRIPE_SECRET_KEY);
 
-        // Step 1: get all disputes
+        // Get all disputes
         $rawList = \Stripe\Dispute::all(['limit' => 100]);
 
-        // Step 2: collect all charge IDs and fetch charges in one expand call
-        $chargeIds = array_map(fn($d) => $d->charge, $rawList->data);
-        $chargeIds = array_unique(array_filter($chargeIds));
-
-        // Build charge→email map by fetching each charge with customer expand
-        // Use a cache to avoid duplicate requests for same customer
+        // Build customer_id → email map using Customer::retrieve per unique customer
+        // Disputes have charge.customer — retrieve each unique customer ID once
         $custEmailCache = [];
-        $chargeEmailMap = [];
-        foreach ($chargeIds as $chId) {
+
+        // First pass: collect unique customer IDs from charges (no expand needed)
+        foreach ($rawList->data as $d) {
+            $chId = $d->charge;
+            if (!$chId) continue;
             try {
-                $ch = \Stripe\Charge::retrieve(['id' => $chId, 'expand' => ['customer']]);
-                $em = '';
-                // billing_details.email
-                $em = $ch->billing_details->email ?? '';
-                // customer.email (expanded or string ID)
-                if (!$em) {
-                    $cust = $ch->customer ?? null;
-                    if (is_object($cust) && !empty($cust->email)) {
-                        $em = $cust->email;
-                        $custEmailCache[$cust->id] = $em;
-                    } elseif (is_string($cust) && $cust) {
-                        if (isset($custEmailCache[$cust])) {
-                            $em = $custEmailCache[$cust];
-                        } else {
-                            try {
-                                $cObj = \Stripe\Customer::retrieve($cust);
-                                $em = $cObj->email ?? '';
-                                $custEmailCache[$cust] = $em;
-                            } catch (\Exception $e2) {}
-                        }
-                    }
+                $ch = \Stripe\Charge::retrieve($chId); // no expand, just get charge
+                $custId = is_object($ch->customer) ? $ch->customer->id : ($ch->customer ?? '');
+                if ($custId && !isset($custEmailCache[$custId])) {
+                    $custEmailCache[$custId] = null; // mark as needed
                 }
-                // receipt_email
+            } catch (\Exception $e) {}
+        }
+
+        // Fetch each unique customer once
+        foreach (array_keys($custEmailCache) as $custId) {
+            try {
+                $cObj = \Stripe\Customer::retrieve($custId);
+                $custEmailCache[$custId] = $cObj->email ?? '';
+            } catch (\Exception $e) {
+                $custEmailCache[$custId] = '';
+            }
+        }
+
+        // Second pass: build charge→email map
+        $chargeEmailMap = [];
+        foreach ($rawList->data as $d) {
+            $chId = $d->charge;
+            if (!$chId) { $chargeEmailMap[$chId] = ''; continue; }
+            try {
+                $ch = \Stripe\Charge::retrieve($chId);
+                $em = $ch->billing_details->email ?? '';
+                if (!$em) {
+                    $custId = is_object($ch->customer) ? $ch->customer->id : ($ch->customer ?? '');
+                    $em = $custEmailCache[$custId] ?? '';
+                }
                 if (!$em && !empty($ch->receipt_email)) $em = $ch->receipt_email;
-                // metadata
-                if (!$em && !empty($ch->metadata['email'])) $em = $ch->metadata['email'];
                 $chargeEmailMap[$chId] = $em;
             } catch (\Exception $e) {
                 $chargeEmailMap[$chId] = '';
             }
         }
 
-        // Step 3: build dispute rows using cached emails
+        // Build dispute rows
         foreach ($rawList->data as $d) {
             $em    = $chargeEmailMap[$d->charge] ?? '';
             $chAmt = $d->amount;
@@ -247,34 +251,6 @@ if (STRIPE_SECRET_KEY) {
         }
         usort($disputes, fn($a, $b) => strcmp($b['date'], $a['date']));
 
-        // DEBUG: store first few charge email sources for inspection
-        $debugInfo = [];
-        $debugCount = 0;
-        foreach ($chargeEmailMap as $chId => $em) {
-            if ($debugCount++ >= 3) break;
-            $debugInfo[] = $chId . ' => ' . ($em ?: '[EMPTY]');
-        }
-        // Also check what fields the first charge actually has
-        if (!empty($rawList->data)) {
-            $firstChId = $rawList->data[0]->charge;
-            try {
-                $testCh = \Stripe\Charge::retrieve(['id' => $firstChId, 'expand' => ['customer']]);
-                $debugInfo[] = 'billing_email: ' . ($testCh->billing_details->email ?? 'NULL');
-                $debugInfo[] = 'receipt_email: ' . ($testCh->receipt_email ?? 'NULL');
-                $cust = $testCh->customer;
-                $debugInfo[] = 'customer type: ' . gettype($cust);
-                if (is_object($cust)) {
-                    $debugInfo[] = 'customer.email: ' . ($cust->email ?? 'NULL');
-                } elseif (is_string($cust)) {
-                    $debugInfo[] = 'customer is string ID: ' . $cust;
-                    $cObj = \Stripe\Customer::retrieve($cust);
-                    $debugInfo[] = 'retrieved customer.email: ' . ($cObj->email ?? 'NULL');
-                }
-            } catch (\Exception $e3) {
-                $debugInfo[] = 'debug error: ' . $e3->getMessage();
-            }
-        }
-        $GLOBALS['stripeDebug'] = $debugInfo;
 
     } catch (\Exception $e) {
         $stripeError = $e->getMessage();
@@ -372,12 +348,7 @@ tr:hover td{background:#0f1a2e}
     <?php if ($stripeError): ?>
       <div class="error-box">⚠ Stripe error: <?= htmlspecialchars($stripeError) ?><br><small>Make sure STRIPE_SECRET_KEY is set in Railway Variables.</small></div>
     <?php endif; ?>
-    <?php if (!empty($GLOBALS['stripeDebug'])): ?>
-      <div class="error-box" style="background:#0a1a0a;border-color:#166534;color:#86efac;font-family:monospace;font-size:11px;line-height:1.8">
-        <b>DEBUG — Stripe email sources (first charge):</b><br>
-        <?php foreach ($GLOBALS['stripeDebug'] as $line): ?><?= htmlspecialchars($line) ?><br><?php endforeach; ?>
-      </div>
-    <?php endif; ?>
+
     <div class="form-row">
       <input class="input" id="emailInput" type="email" placeholder="customer@email.com">
       <select class="input" id="reasonSelect" style="flex:0 0 200px">
