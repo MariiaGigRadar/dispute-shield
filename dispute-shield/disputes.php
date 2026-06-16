@@ -179,6 +179,7 @@ if (STRIPE_SECRET_KEY) {
         \Stripe\Stripe::setApiKey(STRIPE_SECRET_KEY);
 
         $list = \Stripe\Dispute::all(['limit' => 100]);
+        $debugLines = [];
         foreach ($list->data as $d) {
             $em    = '';
             $chAmt = $d->amount;
@@ -187,8 +188,33 @@ if (STRIPE_SECRET_KEY) {
                     'id'     => $d->charge,
                     'expand' => ['customer', 'billing_details'],
                 ]);
-                $em = $ch->billing_details->email ?? ($ch->customer->email ?? '');
-            } catch (\Exception $e) {}
+                $billingEmail  = $ch->billing_details->email ?? null;
+                $receiptEmail  = $ch->receipt_email ?? null;
+                $customerRaw   = $ch->customer ?? null;
+                $customerEmail = null;
+                $customerType  = gettype($customerRaw);
+                if (is_object($customerRaw)) {
+                    $customerEmail = $customerRaw->email ?? null;
+                } elseif (is_string($customerRaw) && $customerRaw) {
+                    $cObj = \Stripe\Customer::retrieve($customerRaw);
+                    $customerEmail = $cObj->email ?? null;
+                    $customerType  = 'string→' . ($customerEmail ? 'found' : 'no_email');
+                }
+                $em = $billingEmail ?? $customerEmail ?? $receiptEmail ?? '';
+                if (count($debugLines) < 3) {
+                    $debugLines[] = sprintf(
+                        'charge=%s | billing=%s | receipt=%s | cust_type=%s | cust_email=%s → em=%s',
+                        $d->charge,
+                        var_export($billingEmail, true),
+                        var_export($receiptEmail, true),
+                        $customerType,
+                        var_export($customerEmail, true),
+                        $em ?: '[EMPTY]'
+                    );
+                }
+            } catch (\Exception $e) {
+                if (count($debugLines) < 3) $debugLines[] = 'ERROR: ' . $e->getMessage();
+            }
 
             $status = $d->status;
             $stats['total']++;
@@ -290,6 +316,13 @@ tr:hover td{background:#0f1a2e}
 </div>
 
 <div class="container">
+
+  <?php if (!empty($debugLines)): ?>
+  <div style="background:#0a1a0a;border:1px solid #166534;border-radius:8px;padding:12px 16px;margin-bottom:16px;font-family:monospace;font-size:11px;color:#86efac;line-height:1.8">
+    <b style="color:#4ade80">DEBUG — first 3 charges:</b><br>
+    <?php foreach ($debugLines as $line): ?><?= htmlspecialchars($line) ?><br><?php endforeach; ?>
+  </div>
+  <?php endif; ?>
 
   <!-- Stats -->
   <div class="stats-row">
