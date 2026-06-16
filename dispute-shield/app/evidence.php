@@ -1,538 +1,526 @@
 <?php
-/**
- * Evidence builder  -  per Stripe best practices + Visa Compelling Evidence 3.0
- *
- * What Stripe/banks need to win:
- * 1. BACKGROUND (all disputes): customer name, email, billing address, IP, AVS/CVC match
- * 2. AUTHORIZATION proof: IP address matches, account login history, device fingerprint
- * 3. SERVICE DELIVERY proof: specific feature usage with timestamps, measurable outcomes
- * 4. POLICY proof: refund/cancellation policy shown at checkout
- * 5. NO PRIOR CONTACT: zero support tickets before dispute
- * 6. REASON-SPECIFIC: tailored rebuttal per dispute type
- */
+require_once __DIR__ . '/vendor/autoload.php';
+require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/app/posthog.php';
+require_once __DIR__ . '/app/evidence.php';
+require_once __DIR__ . '/app/intercom.php';
 
-function buildEvidence(array $u, string $email, string $reason = 'fraudulent'): array {
-    $plan   = $u['plan'] ?? 'GigRadar Subscription';
-    $amount = $u['total_paid_usd'] ?? '0.00';
+session_start();
 
-    $base = [
-        'customer_name'          => $u['name'] ?: $email,
-        'customer_email_address' => $email,
-        'customer_purchase_ip'   => $u['customer_purchase_ip'] ?? '',
-        'service_date'           => $u['subscription_start'] ?? '',
-        'product_description'    =>
-            "GigRadar ($plan)  -  Cloud-based AI SaaS for Upwork freelancers. " .
-            "Includes: AI auto-bidder, job scanner, reply tracker, analytics dashboard, training academy. " .
-            "100% digital delivery, instant access via browser. " .
-            "Total billed: \$$amount USD. Website: https://gigradar.io",
-        'refund_policy'          =>
-            "Digital SaaS subscriptions are non-refundable once the billing period has started " .
-            "and platform access has been granted. Published at: https://gigradar.io/legal",
-        'refund_policy_disclosure' =>
-            "Refund policy was displayed on the Stripe checkout page prior to purchase " .
-            "and is permanently available at https://gigradar.io/legal",
-        'cancellation_policy'    =>
-            "Subscriptions can be canceled anytime via Settings > Subscription in the GigRadar dashboard " .
-            "or through the Stripe customer portal. Cancellation takes effect at end of the current billing " .
-            "period. No cancellation fee. Policy: https://gigradar.io/legal",
-        'cancellation_policy_disclosure' =>
-            "Cancellation policy was shown on the Stripe checkout page and at https://gigradar.io/legal",
-        'access_activity_log'    => buildActivityLog($u, $email),
-        'uncategorized_text'     => buildRebuttalLetter($u, $email, $reason),
-    ];
+// ── Auth ───────────────────────────────────────────────────────────────────
+$allowedEmails = ['maria@gigradar.io', 'vadym@gigradar.io', 'antonina@gigradar.io'];
+$secretCode    = 'vadym27039';
 
-    switch ($reason) {
-        case 'subscription_canceled':
-            return array_merge($base, [
-                'cancellation_policy' =>
-                    "GigRadar subscriptions can be canceled anytime from the dashboard " .
-                    "(Settings -> Subscription -> Cancel). Cancellation takes effect at " .
-                    "end of the current billing period. No cancellation fee applies. " .
-                    "Full policy: https://gigradar.io/legal",
-                'cancellation_policy_disclosure' =>
-                    "The cancellation policy was displayed on the Stripe checkout page " .
-                    "at time of purchase and is permanently available at https://gigradar.io/legal",
-                'cancellation_rebuttal' =>
-                    $u['is_canceled'] && $u['subscription_canceled']
-                        ? "Customer canceled on " . $u['subscription_canceled'] .
-                          " but the disputed charge was on " . $u['subscription_start'] .
-                          "  -  BEFORE the cancellation. The charge is valid."
-                        : "No cancellation was ever submitted through the GigRadar dashboard, " .
-                          "Stripe customer portal, email, or support chat. The subscription " .
-                          "remains ACTIVE as of " . date('Y-m-d') . ".",
-            ]);
-
-        case 'credit_not_processed':
-            return array_merge($base, [
-                'refund_policy' =>
-                    "Digital SaaS subscriptions are non-refundable once the billing period " .
-                    "has started and the platform has been accessed. Full policy: https://gigradar.io/legal",
-                'refund_policy_disclosure' =>
-                    "Refund policy was shown on the Stripe checkout page and at https://gigradar.io/legal",
-                'refund_refusal_explanation' =>
-                    "No refund was ever promised to this customer. Zero refund-related " .
-                    "communications exist in our support records for " . $email . ". " .
-                    "The customer sent " . (int)$u['proposals_sent'] . " proposals and received " .
-                    (int)$u['total_replies'] . " replies  -  service was fully delivered.",
-            ]);
-
-        case 'product_not_received':
-        case 'product_unacceptable':
-        case 'fraudulent':
-        case 'unrecognized':
-        default:
-            return $base;
-    }
-}
-
-/**
- * Activity log  -  chronological, specific, timestamped.
- * Goes into Stripe's access_activity_log field.
- */
-function buildActivityLog(array $u, string $email): string {
-    $lines = [];
-    $lines[] = "ACCOUNT ACTIVITY LOG";
-    $lines[] = "Customer: $email";
-    $lines[] = "Generated: " . date('Y-m-d H:i') . " UTC | Source: GigRadar Analytics (PostHog)";
-    $lines[] = str_repeat("-", 56);
-    $lines[] = "";
-    $lines[] = "CHRONOLOGICAL TIMELINE:";
-
-    if ($u['signup_date'] && $u['signup_date'] !== 'unknown')
-        $lines[] = "  " . $u['signup_date'] . "  Account created & subscription started";
-    if ($u['subscription_start'] && $u['subscription_start'] !== 'unknown')
-        $lines[] = "  " . $u['subscription_start'] . "  First payment processed  -  platform access granted";
-    if ($u['autobidder_setup_date'] && $u['autobidder_setup_date'] !== 'never')
-        $lines[] = "  " . $u['autobidder_setup_date'] . "  Customer configured AI auto-bidder (multi-step setup)";
-    if ($u['first_scanner_date'] && $u['first_scanner_date'] !== 'never')
-        $lines[] = "  " . $u['first_scanner_date'] . "  First job scanner created";
-    if ($u['first_reply_date'] && $u['first_reply_date'] !== 'never')
-        $lines[] = "  " . $u['first_reply_date'] . "  First Upwork client reply received";
-    if ($u['last_pageview'] && $u['last_pageview'] !== 'unknown')
-        $lines[] = "  " . $u['last_pageview'] . "  Last platform login";
-    if ($u['last_active'] && $u['last_active'] !== 'unknown')
-        $lines[] = "  " . $u['last_active'] . "  Last recorded activity";
-    if ($u['is_canceled'] && $u['subscription_canceled'])
-        $lines[] = "  " . $u['subscription_canceled'] . "  Subscription canceled by customer";
-
-    $lines[] = "";
-    $lines[] = "USAGE METRICS (entire subscription period):";
-    $lines[] = "  Proposals sent via auto-bidder:     " . (int)$u['proposals_sent'];
-    $lines[] = "  Upwork client replies received:     " . (int)$u['total_replies'];
-    $lines[] = "  Job scanners created:               " . (int)$u['scanners_created'];
-    $lines[] = "  Auto-bidder config changes:         " . (int)$u['autobidder_configs'];
-    $lines[] = "  Manual gig opportunity searches:    " . (int)$u['gigs_searches'];
-    $lines[] = "  Platform page views (logins):       " . (int)$u['total_pageviews'];
-    $lines[] = "  Academy lessons completed:          " . (int)$u['lessons_completed'];
-
-    if ((int)$u['no_connects_events'] > 0) {
-        $lines[] = "  Auto-bidder pauses (no connects):  " . (int)$u['no_connects_events'] .
-                   "x  [NOTE: caused by Upwork connect quota, NOT GigRadar failure]";
-    }
-
-    $lines[] = "";
-    $lines[] = "FINANCIAL:";
-    $lines[] = "  Subscription plan:   " . $u['plan'];
-    $lines[] = "  Total billed:        $" . $u['total_paid_usd'] . " USD";
-    $lines[] = "  Subscription status: " . ($u['is_canceled'] ? "Canceled " . $u['subscription_canceled'] : "ACTIVE");
-
-        // Card & identity
-    if (!empty($u['card_last4'])) {
-        $lines[] = "";
-        $lines[] = "PAYMENT CARD:";
-        $lines[] = "  " . strtoupper($u['card_brand'] ?? '') . " ending " . $u['card_last4'] . "  exp " . ($u['card_exp'] ?? '');
-    }
-    if (!empty($u['avs_result'])) {
-        $lines[] = "";
-        $lines[] = "CARD VERIFICATION:";
-        $lines[] = "  Postal code check: " . strtoupper($u['avs_result']);
-        $lines[] = "  CVC check:         " . strtoupper($u['cvc_result'] ?? 'unknown');
-        if (($u['avs_result'] ?? '') === 'pass' || ($u['cvc_result'] ?? '') === 'pass') {
-            $lines[] = "  -> AVS/CVC match = real cardholder authorized this transaction";
-        }
-    }
-    if (!empty($u['customer_purchase_ip'])) {
-        $lines[] = "";
-        $lines[] = "PURCHASE IP ADDRESS:";
-        $lines[] = "  IP address:      " . $u['customer_purchase_ip'];
-        if (!empty($u['billing_address'])) $lines[] = "  Billing address: " . $u['billing_address'];
-    }
-    if (!empty($u['geo_country'])) {
-        $lines[] = "";
-        $lines[] = "GEO DATA (PostHog analytics):";
-        $lines[] = "  Country: " . $u['geo_country'] . (!empty($u['geo_city']) ? "  City: " . $u['geo_city'] : '');
-        if (!empty($u['referring_domain'])) $lines[] = "  Signup referrer: " . $u['referring_domain'];
-    }
-    if (!empty($u['prior_transactions']) && count($u['prior_transactions']) >= 2) {
-        $lines[] = "";
-        $lines[] = "PRIOR UNDISPUTED TRANSACTIONS (Visa Compelling Evidence 3.0):";
-        $lines[] = "  Prior successful charges from this cardholder that were never disputed:";
-        foreach ($u['prior_transactions'] as $i => $tx) {
-            $n = $i + 1;
-            $lines[] = "  {$n}. Date: " . $tx['date'] . "  Amount: $" . $tx['amount'] . "  Charge: " . $tx['id'];
-        }
-        $lines[] = "  -> These transactions qualify for Visa CE 3.0 submission (doubles win rate)";
-    }
-
-    return implode("\n", $lines);
-}
-
-/**
- * Main rebuttal letter  -  the most important field.
- * Structured for bank reviewers who spend 2-3 minutes per case.
- */
-function buildRebuttalLetter(array $u, string $email, string $reason): string {
-    if (!($u['found'] ?? false)) {
-        return "Customer $email not found in analytics. Contact support@gigradar.io.";
-    }
-
-    $name      = $u['name'] ?: $email;
-    $proposals = (int)$u['proposals_sent'];
-    $replies   = (int)$u['total_replies'];
-    $pageviews = (int)$u['total_pageviews'];
-    $subStart  = $u['subscription_start'];
-    $subCancel = $u['subscription_canceled'];
-    $lastActive= $u['last_active'];
-    $plan      = $u['plan'];
-    $totalPaid = $u['total_paid_usd'];
-    $abSetup   = $u['autobidder_setup_date'];
-    $scanners  = (int)$u['scanners_created'];
-    $noConn    = (int)$u['no_connects_events'];
-    $lessons   = (int)$u['lessons_completed'];
-    $searches  = (int)$u['gigs_searches'];
-    $abConfigs = (int)$u['autobidder_configs'];
-    $signup    = $u['signup_date'];
-    $firstReply= $u['first_reply_date'];
-
-    $out = [];
-
-    // -- Header ---------------------------------------------------------------
-    $out[] = "DISPUTE REBUTTAL  -  GIGRADAR";
-    $out[] = "Date: " . date('F j, Y');
-    $out[] = "Dispute reason: " . strtoupper(str_replace('_', ' ', $reason));
-    $out[] = "";
-    $out[] = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-    $out[] = "SECTION 1  -  TRANSACTION FACTS";
-    $out[] = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-    $out[] = "";
-    $out[] = "Merchant:             GigRadar (gigradar.io)";
-    $out[] = "Merchant contact:     support@gigradar.io";
-    $out[] = "Customer name:        $name";
-    $out[] = "Customer email:       $email";
-    $out[] = "Subscription plan:    $plan";
-    $out[] = "Subscription start:   $signup";
-    $out[] = "Total billed to date: \$$totalPaid USD";
-
-    if ($u['is_canceled'] && $subCancel) {
-        $out[] = "Subscription status:  Canceled by customer on $subCancel";
+if (isset($_POST['login_email'])) {
+    $le = strtolower(trim($_POST['login_email'] ?? ''));
+    $lc = trim($_POST['login_code'] ?? '');
+    if (in_array($le, $allowedEmails) && $lc === $secretCode) {
+        $_SESSION['gr_user'] = $le;
     } else {
-        $out[] = "Subscription status:  ACTIVE  -  never canceled";
+        $loginError = 'Invalid email or access code.';
     }
-    $out[] = "Last platform login:  " . $u['last_pageview'];
-    $out[] = "Last activity:        $lastActive";
-    if (!empty($u['customer_purchase_ip'])) {
-        $out[] = "Purchase IP:          " . $u['customer_purchase_ip'];
-    }
-    if (!empty($u['billing_address'])) {
-        $out[] = "Billing address:      " . $u['billing_address'];
-    }
-    if (!empty($u['avs_result']) && $u['avs_result'] === 'pass') {
-        $out[] = "Card verification:    AVS PASSED + CVC PASSED (real cardholder)";
-    }
-    if (!empty($u['geo_country'])) {
-        $out[] = "Cardholder location:  " . $u['geo_country'] . (!empty($u['geo_city']) ? ", " . $u['geo_city'] : '');
-    }
-    $out[] = "";
-
-    // -- Service description ---------------------------------------------------
-    $out[] = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-    $out[] = "SECTION 2  -  WHAT IS GIGRADAR";
-    $out[] = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-    $out[] = "";
-    $out[] = "GigRadar (gigradar.io) is a cloud-based B2B SaaS platform for Upwork";
-    $out[] = "freelancers and agencies. Core features include:";
-    $out[] = "  * AI-powered job scanner  -  monitors Upwork for relevant job postings";
-    $out[] = "  * Automated proposal sender  -  submits customized proposals automatically";
-    $out[] = "  * Reply tracker  -  captures and logs Upwork client responses";
-    $out[] = "  * Performance analytics dashboard  -  tracks metrics and ROI";
-    $out[] = "  * Training academy  -  video lessons on Upwork success";
-    $out[] = "";
-    $out[] = "Delivery method: 100% digital, via web browser.";
-    $out[] = "No physical product, no shipping, no download required.";
-    $out[] = "Platform access is granted INSTANTLY upon successful payment.";
-    $out[] = "";
-
-    // -- Reason-specific intro -------------------------------------------------
-    $out[] = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-    $out[] = "SECTION 3  -  RESPONSE TO SPECIFIC CLAIM";
-    $out[] = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-    $out[] = "";
-
-    switch ($reason) {
-        case 'fraudulent':
-        case 'unrecognized':
-            $out[] = "CLAIM: Cardholder states they did not authorize this transaction.";
-            $out[] = "";
-            $out[] = "REBUTTAL: The transaction was fully authorized. The account was";
-            $out[] = "registered with email $email and the customer:";
-            $out[] = "  (a) Completed account registration and email verification";
-            $out[] = "  (b) Logged into the platform " . ($pageviews ?: 'multiple') . " times";
-            $out[] = "  (c) Performed multi-step setup requiring real Upwork credentials";
-            $out[] = "  (d) Had " . $proposals . " proposals sent using their OWN Upwork connects";
-            $out[] = "  (e) Was last active on $lastActive  -  after the disputed charge";
-            $out[] = "";
-            $out[] = "An unauthorized party cannot: connect a real Upwork account, write";
-            $out[] = "custom proposal templates, and generate real replies from Upwork";
-            $out[] = "employers. All of this requires the real cardholder's credentials.";
-            break;
-
-        case 'subscription_canceled':
-            $out[] = "CLAIM: Cardholder states they canceled before this charge.";
-            $out[] = "";
-            if ($u['is_canceled'] && $subCancel) {
-                $out[] = "PARTIAL AGREEMENT: A cancellation was submitted on $subCancel.";
-                $out[] = "HOWEVER: The disputed charge was on $subStart  -  BEFORE the";
-                $out[] = "cancellation. Per our Terms of Service (gigradar.io/legal),";
-                $out[] = "cancellations take effect at END of the current billing period.";
-                $out[] = "The charge covered a period that was already active and used.";
-            } else {
-                $out[] = "REBUTTAL: No cancellation exists in any channel:";
-                $out[] = "  * GigRadar dashboard (Settings -> Subscription): NO";
-                $out[] = "  * Stripe customer portal: NO";
-                $out[] = "  * Email to support@gigradar.io: NO";
-                $out[] = "  * In-app support chat: NO";
-                $out[] = "";
-                $out[] = "Subscription status as of " . date('Y-m-d') . ": ACTIVE";
-                $out[] = "The customer continued using the platform after the disputed";
-                $out[] = "charge  -  last activity recorded on $lastActive.";
-            }
-            break;
-
-        case 'credit_not_processed':
-            $out[] = "CLAIM: Cardholder states a refund was promised but not received.";
-            $out[] = "";
-            $out[] = "REBUTTAL: No refund was ever promised to this customer.";
-            $out[] = "Full search of all support channels for $email shows:";
-            $out[] = "  * Support tickets: 0";
-            $out[] = "  * Emails to support@gigradar.io: 0";
-            $out[] = "  * In-app chat conversations: 0";
-            $out[] = "  * Refund requests: 0";
-            $out[] = "";
-            $out[] = "Our no-refund policy for digital subscriptions was disclosed at";
-            $out[] = "checkout and is permanently available at https://gigradar.io/legal.";
-            $out[] = "The customer accepted these terms before completing payment.";
-            break;
-
-        case 'product_not_received':
-            $out[] = "CLAIM: Cardholder states they did not receive the service.";
-            $out[] = "";
-            $out[] = "REBUTTAL: GigRadar is a digital SaaS  -  there is no physical";
-            $out[] = "delivery. Access is instant upon payment. The usage data below";
-            $out[] = "conclusively proves the service was received and actively used.";
-            break;
-
-        case 'product_unacceptable':
-            $out[] = "CLAIM: Cardholder states service was not as described.";
-            $out[] = "";
-            $out[] = "REBUTTAL: The service was delivered exactly as described on";
-            $out[] = "gigradar.io. The customer received measurable results (replies";
-            $out[] = "from real Upwork clients). No complaint was filed before dispute.";
-            break;
-
-        default:
-            $out[] = "We dispute this chargeback and provide the following evidence.";
-    }
-    $out[] = "";
-
-    // -- Evidence of delivery  -  numbered, specific -----------------------------
-    $out[] = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-    $out[] = "SECTION 4  -  EVIDENCE OF SERVICE DELIVERY";
-    $out[] = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-    $out[] = "";
-
-    $n = 1;
-
-    // 4.1 Account setup
-    if ($abSetup && $abSetup !== 'never') {
-        $out[] = "$n. ACCOUNT CONFIGURATION  -  $abSetup";
-        $out[] = "   Customer logged in and configured the AI auto-bidder.";
-        $out[] = "   This requires:";
-        $out[] = "     * Connecting their real Upwork account (OAuth authorization)";
-        $out[] = "     * Writing a custom proposal template";
-        $out[] = "     * Selecting target job categories and budget ranges";
-        if ($abConfigs > 1) {
-            $out[] = "   Customer updated settings $abConfigs times total  -  showing";
-            $out[] = "   ongoing, intentional engagement with the platform.";
-        }
-        $out[] = "";
-        $n++;
-    }
-
-    // 4.2 Scanners
-    if ($scanners > 0) {
-        $out[] = "$n. JOB SCANNERS CREATED  -  $scanners scanner(s)";
-        if ($u['first_scanner_date'] && $u['first_scanner_date'] !== 'never') {
-            $out[] = "   First created: " . $u['first_scanner_date'];
-        }
-        $out[] = "   Each scanner requires defining search keywords, budget filters,";
-        $out[] = "   and job category preferences  -  deliberate platform usage.";
-        $out[] = "";
-        $n++;
-    }
-
-    // 4.3 Proposals  -  THE strongest evidence
-    if ($proposals > 0) {
-        $out[] = "$n. PROPOSALS SENT  -  $proposals TOTAL ← KEY EVIDENCE";
-        $out[] = "   GigRadar sent $proposals proposals to Upwork employers on behalf";
-        $out[] = "   of this customer. CRITICAL FACT: Each proposal consumed";
-        $out[] = "   \"connects\"  -  credits purchased by the customer from Upwork's";
-        $out[] = "   own marketplace. GigRadar cannot send proposals without the";
-        $out[] = "   customer's real Upwork credentials and their own connects.";
-        $out[] = "";
-        $out[] = "   This is irrefutable proof that:";
-        $out[] = "     (a) The real cardholder authorized the Upwork integration";
-        $out[] = "     (b) GigRadar actively delivered the core service";
-        $out[] = "     (c) Real Upwork credits (the customer's money) were consumed";
-        $out[] = "";
-        $n++;
-    }
-
-    // 4.4 Replies  -  outcome proof
-    if ($replies > 0) {
-        $out[] = "$n. UPWORK CLIENT REPLIES  -  $replies TOTAL";
-        if ($firstReply && $firstReply !== 'never') {
-            $out[] = "   First reply received: $firstReply";
-        }
-        $out[] = "   The customer received $replies direct messages from real Upwork";
-        $out[] = "   employers as a result of GigRadar-sent proposals. These are";
-        $out[] = "   independent third-party responses  -  they cannot be fabricated.";
-        $out[] = "   Receiving replies IS the service the customer paid for.";
-        $out[] = "";
-        $n++;
-    } elseif ($proposals > 0) {
-        // Has proposals but no replies  -  explain
-        $out[] = "$n. NOTE ON REPLY COUNT";
-        $out[] = "   While $proposals proposals were sent, reply tracking depends on";
-        $out[] = "   Upwork's messaging API. Some replies may not be tracked if the";
-        $out[] = "   customer's Upwork account permissions limited API access.";
-        $out[] = "   The proposal sending itself (consuming real Upwork connects)";
-        $out[] = "   confirms service delivery regardless of tracked replies.";
-        $out[] = "";
-        $n++;
-    }
-
-    // 4.5 Platform engagement
-    if ($pageviews > 0 || $searches > 0 || $lessons > 0) {
-        $out[] = "$n. ONGOING PLATFORM ENGAGEMENT";
-        if ($pageviews > 0) $out[] = "   * $pageviews platform page views (login sessions)";
-        if ($searches > 0)  $out[] = "   * $searches manual job opportunity searches";
-        if ($lessons > 0)   $out[] = "   * $lessons academy lessons completed";
-        $out[] = "   * Last session: $lastActive";
-        $out[] = "   * Duration of active use: from $signup to $lastActive";
-        $out[] = "";
-        $n++;
-    }
-
-    // 4.6 No-connects explanation (turns weakness into strength)
-    if ($noConn > 0) {
-        $out[] = "$n. CLARIFICATION: AUTO-BIDDER PAUSES ($noConn occurrences)";
-        $out[] = "   The auto-bidder paused $noConn time(s) when the customer's";
-        $out[] = "   Upwork \"connects\" quota ran out. This is NOT a service failure.";
-        $out[] = "";
-        $out[] = "   IMPORTANT CONTEXT:";
-        $out[] = "   * \"Connects\" = Upwork's own credit system, purchased directly";
-        $out[] = "     from Upwork. GigRadar has no control over connects.";
-        $out[] = "   * GigRadar's platform was fully operational throughout.";
-        $out[] = "   * Customer was notified via email each time.";
-        $out[] = "   * Despite pauses, customer sent $proposals proposals total  - ";
-        $out[] = "     proving the service worked effectively when connects available.";
-        $out[] = "   * This is equivalent to a printer running out of paper  -  the";
-        $out[] = "     software (GigRadar) is not at fault.";
-        $out[] = "";
-        $n++;
-    }
-
-    // -- No prior contact ------------------------------------------------------
-    $out[] = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-    $out[] = "SECTION 5  -  ZERO PRIOR CONTACT";
-    $out[] = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-    $out[] = "";
-    $out[] = "A full search of ALL GigRadar support channels for $email:";
-    $out[] = "  Support tickets submitted:        0";
-    $out[] = "  Emails to support@gigradar.io:    0";
-    $out[] = "  In-app chat messages:             0";
-    $out[] = "  Refund requests:                  0";
-    $out[] = "  Cancellation requests:            " . ($u['is_canceled'] ? "1 (on " . $u['subscription_canceled'] . ")" : "0");
-    $out[] = "";
-    $out[] = "The customer gave us NO opportunity to resolve any concern before";
-    $out[] = "filing this chargeback. Our support team (support@gigradar.io) is";
-    $out[] = "available 24/7 and resolves billing issues when contacted directly.";
-    $out[] = "";
-
-    // -- Policy ----------------------------------------------------------------
-    $out[] = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-    $out[] = "SECTION 6  -  TERMS & REFUND POLICY";
-    $out[] = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-    $out[] = "";
-    $out[] = "Published at: https://gigradar.io/legal";
-    $out[] = "Displayed: On Stripe checkout page at time of purchase.";
-    $out[] = "Customer accepted terms by completing payment on $signup.";
-    $out[] = "";
-    $out[] = "Key terms:";
-    $out[] = "  * Digital subscriptions are non-refundable once the billing";
-    $out[] = "    period begins and platform access has been granted.";
-    $out[] = "  * Customers may cancel at any time (Settings -> Subscription).";
-    $out[] = "  * Cancellation takes effect at end of current billing period.";
-    $out[] = "  * No cancellation fee applies.";
-    $out[] = "";
-
-    // -- Conclusion ------------------------------------------------------------
-    $out[] = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-    $out[] = "SECTION 7  -  CONCLUSION";
-    $out[] = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-    $out[] = "";
-
-    $facts = [];
-    if ($abSetup && $abSetup !== 'never') $facts[] = "configured the platform on $abSetup";
-    if ($proposals > 0) $facts[] = "sent $proposals proposals to Upwork employers";
-    if ($replies > 0)   $facts[] = "received $replies replies from real clients";
-    if ($pageviews > 0) $facts[] = "logged in $pageviews times";
-    if ($lessons > 0)   $facts[] = "completed $lessons academy lessons";
-
-    $out[] = "The evidence establishes beyond reasonable doubt that:";
-    $out[] = "";
-    $out[] = "  [YES] The customer ($name) knowingly purchased a GigRadar";
-    $out[] = "    subscription on $signup and accepted our Terms of Service.";
-    $out[] = "";
-    $out[] = "  [YES] The service was fully delivered  -  the customer:";
-    foreach ($facts as $f) {
-        $out[] = "     -  $f";
-    }
-    $out[] = "";
-    $out[] = "  [YES] Active use continued through $lastActive  -  AFTER the";
-    $out[] = "    disputed charge was processed.";
-    $out[] = "";
-    $out[] = "  [YES] No cancellation, complaint, or refund request was ever";
-    $out[] = "    submitted before this chargeback was filed.";
-    $out[] = "";
-    $out[] = "  [YES] Total value delivered: $proposals proposals sent,";
-    if ($replies > 0) {
-        $out[] = "    $replies real Upwork client responses received.";
-    }
-    $out[] = "";
-    $out[] = "This chargeback represents first-party fraud (\"friendly fraud\").";
-    $out[] = "The service was fully rendered. We respectfully request the";
-    $out[] = "dispute be decided in GigRadar's favor and the funds returned.";
-
-    // Visa CE 3.0 callout if applicable
-    if (!empty($u['prior_transactions']) && count($u['prior_transactions']) >= 2) {
-        $out[] = "";
-        $out[] = "  * Visa CE 3.0: " . count($u['prior_transactions']) . " prior undisputed transactions confirm non-fraudulent history.";
-    }
-    $out[] = "";
-    $out[] = "GigRadar Support Team";
-    $out[] = "support@gigradar.io | https://gigradar.io";
-    $out[] = "Company: GigRadar | Registered Business";
-
-    return implode("\n", $out);
 }
+if (isset($_POST['signout'])) {
+    session_destroy();
+    header('Location: /');
+    exit;
+}
+if (empty($_SESSION['gr_user'])) {
+    showLogin($loginError ?? null);
+    exit;
+}
+
+$currentUser = $_SESSION['gr_user'];
+$action      = $_GET['action'] ?? 'list';
+
+// ── Helper: get Stripe customer by email or Intercom stripe_id ─────────────
+function getStripeCustomer(string $email): ?object {
+    if (!STRIPE_SECRET_KEY) return null;
+    \Stripe\Stripe::setApiKey(STRIPE_SECRET_KEY);
+    // Try Intercom stripe_id first
+    $ic = getIntercomData($email);
+    if (!empty($ic['stripe_id'])) {
+        try { return \Stripe\Customer::retrieve($ic['stripe_id']); } catch (\Exception $e) {}
+    }
+    // Fallback: email search
+    $res = \Stripe\Customer::search(['query' => 'email:"' . $email . '"', 'limit' => 1]);
+    return $res->data[0] ?? null;
+}
+
+// ── Helper: enrich user array with Stripe data ─────────────────────────────
+function enrichWithStripe(array &$u, string $email): void {
+    if (!STRIPE_SECRET_KEY) return;
+    try {
+        \Stripe\Stripe::setApiKey(STRIPE_SECRET_KEY);
+        $cust = getStripeCustomer($email);
+        if (!$cust) return;
+
+        // Plan + subscription start
+        $subs = \Stripe\Subscription::all(['customer' => $cust->id, 'limit' => 1, 'status' => 'all']);
+        foreach ($subs->data as $sub) {
+            $interval = $sub->items->data[0]->price->recurring->interval ?? '';
+            $prodId   = $sub->items->data[0]->price->product ?? '';
+            try {
+                $prod = \Stripe\Product::retrieve($prodId);
+                $u['plan'] = $prod->name . ($interval ? ' (' . ucfirst($interval) . 'ly)' : '');
+            } catch (\Exception $e) {}
+            if ($sub->start_date) {
+                $u['signup_date']        = date('Y-m-d', $sub->start_date);
+                $u['subscription_start'] = date('Y-m-d', $sub->start_date);
+            }
+            // Store real Stripe subscription status
+            $u['stripe_subscription_status'] = $sub->status ?? '';
+        }
+
+        // All charges — total, prior transactions, card info
+        $allCharges = \Stripe\Charge::all(['customer' => $cust->id, 'limit' => 100]);
+        $total = 0;
+        $prior = [];
+        foreach ($allCharges->data as $ch) {
+            if ($ch->status === 'succeeded' && !$ch->refunded) $total += $ch->amount;
+            if ($ch->status === 'succeeded' && empty($ch->dispute)) {
+                $prior[] = ['date' => date('Y-m-d', $ch->created), 'amount' => number_format($ch->amount / 100, 2), 'id' => $ch->id];
+            }
+            if (!isset($u['card_last4']) && $ch->status === 'succeeded') {
+                $ba = $ch->billing_details->address ?? null;
+                if ($ba) {
+                    $parts = array_filter([$ba->line1 ?? '', $ba->city ?? '', $ba->postal_code ?? '', $ba->country ?? '']);
+                    $u['billing_address'] = implode(', ', $parts);
+                }
+                $checks = $ch->payment_method_details->card->checks ?? null;
+                if ($checks) {
+                    $u['avs_result']  = $checks->address_postal_code_check ?? '';
+                    $u['cvc_result']  = $checks->cvc_check ?? '';
+                    $u['avs_address'] = $checks->address_line1_check ?? '';
+                }
+                $card = $ch->payment_method_details->card ?? null;
+                if ($card) {
+                    $u['card_last4'] = $card->last4 ?? '';
+                    $u['card_brand'] = $card->brand ?? '';
+                    $u['card_exp']   = ($card->exp_month ?? '') . '/' . ($card->exp_year ?? '');
+                }
+            }
+        }
+        // If all charges were disputed and total=0, use dispute amount as fallback
+        if ($total <= 0 && !empty($u['dispute_amount'])) {
+            $u['total_paid_usd'] = $u['dispute_amount'];
+        } else {
+            $u['total_paid_usd'] = number_format($total / 100, 2);
+        }
+        if (count($prior) > 1) $u['prior_transactions'] = array_slice($prior, 1, 5);
+
+        // Geo from Intercom if PostHog didn't have it
+        $ic = getIntercomData($email);
+        if (empty($u['geo_country']) && !empty($ic['location']['country'])) {
+            $u['geo_country'] = $ic['location']['country'];
+            $u['geo_city']    = $ic['location']['city'] ?? '';
+        }
+    } catch (\Exception $e) {
+        // Stripe unavailable
+    }
+}
+
+// ── PDF download ───────────────────────────────────────────────────────────
+if ($action === 'pdf') {
+    require_once __DIR__ . '/app/pdf.php';
+    $email  = trim($_GET['email'] ?? '');
+    $reason = trim($_GET['reason'] ?? 'fraudulent');
+    if (!$email) { http_response_code(400); exit('No email'); }
+
+    $u = getPostHogUser($email);
+    $u['dispute_amount'] = trim($_GET['dispute_amount'] ?? '');
+    enrichWithStripe($u, $email);
+
+    $intercom    = getIntercomData($email);
+    $intercomLog = $intercom['summary'] ?? '';
+    $rebuttal    = buildRebuttalLetter($u, $email, $reason);
+    $activityLog = buildActivityLog($u, $email);
+
+    $path  = generateDisputePDF($email, $reason, $u, $rebuttal, $activityLog, $intercomLog);
+    $fname = 'GigRadar_Dispute_' . preg_replace('/[^a-z0-9]/i', '_', $email) . '_' . date('Ymd') . '.pdf';
+    header('Content-Type: application/pdf');
+    header('Content-Disposition: attachment; filename="' . $fname . '"');
+    header('Content-Length: ' . filesize($path));
+    readfile($path);
+    @unlink($path);
+    exit;
+}
+
+// ── Preview (AJAX) ─────────────────────────────────────────────────────────
+if ($action === 'preview') {
+    header('Content-Type: application/json');
+    $email = trim($_POST['email'] ?? '');
+    if (!$email) { echo json_encode(['error' => 'No email']); exit; }
+
+    $u = getPostHogUser($email);
+    $u['dispute_amount'] = trim($_POST['dispute_amount'] ?? '');
+    enrichWithStripe($u, $email);
+
+    $intercom    = getIntercomData($email);
+    $intercomLog = $intercom['summary'] ?? '';
+
+    echo json_encode([
+        'user'         => $u,
+        'intercom'     => $intercom,
+        'stripe_text'  => buildRebuttalLetter($u, $email, $_POST['reason'] ?? 'fraudulent'),
+        'internal_log' => buildActivityLog($u, $email),
+        'intercom_log' => $intercomLog,
+    ]);
+    exit;
+}
+
+// ── Dispute list from Stripe ───────────────────────────────────────────────
+$disputes    = [];
+$stats       = ['total' => 0, 'pending' => 0, 'won' => 0, 'lost' => 0, 'amount' => 0];
+$stripeError = null;
+
+if (STRIPE_SECRET_KEY) {
+    try {
+        \Stripe\Stripe::setApiKey(STRIPE_SECRET_KEY);
+        // Fetch disputes with charge+customer expanded in one call
+        $list = \Stripe\Dispute::all([
+            'limit'  => 100,
+            'expand' => ['data.charge.customer'],
+        ]);
+        foreach ($list->data as $d) {
+            $em    = '';
+            $chAmt = $d->amount;
+
+            // $d->charge is already expanded (object), not just an ID
+            $ch = $d->charge;
+
+            if ($ch && is_object($ch)) {
+                // Source 1: billing_details.email
+                $em = $ch->billing_details->email ?? '';
+
+                // Source 2: expanded customer.email
+                if (!$em) {
+                    $cust = $ch->customer ?? null;
+                    if (is_object($cust) && !empty($cust->email)) {
+                        $em = $cust->email;
+                    } elseif (is_string($cust) && $cust) {
+                        try {
+                            $cObj = \Stripe\Customer::retrieve($cust);
+                            $em   = $cObj->email ?? '';
+                        } catch (\Exception $e2) {}
+                    }
+                }
+
+                // Source 3: receipt_email
+                if (!$em && !empty($ch->receipt_email)) {
+                    $em = $ch->receipt_email;
+                }
+
+                // Source 4: metadata
+                if (!$em && !empty($ch->metadata['email'])) {
+                    $em = $ch->metadata['email'];
+                }
+            }
+
+            $status = $d->status;
+            $stats['total']++;
+            $stats['amount'] += $chAmt;
+            if (in_array($status, ['warning_needs_response', 'needs_response'])) $stats['pending']++;
+            elseif (in_array($status, ['won', 'warning_closed'])) $stats['won']++;
+            elseif (in_array($status, ['lost', 'warning_under_review', 'under_review'])) $stats['lost']++;
+
+            $disputes[] = [
+                'id'        => $d->id,
+                'date'      => date('Y-m-d', $d->created),
+                'email'     => $em,
+                'amount'    => number_format($chAmt / 100, 2),
+                'amount_raw'=> number_format($chAmt / 100, 2),
+                'reason'    => $d->reason,
+                'status'    => $status,
+            ];
+        }
+        usort($disputes, fn($a, $b) => strcmp($b['date'], $a['date']));
+    } catch (\Exception $e) {
+        $stripeError = $e->getMessage();
+    }
+}
+
+// ── HTML output ────────────────────────────────────────────────────────────
+?><!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DisputeShield — GigRadar</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0a0a14;color:#e2e8f0;min-height:100vh}
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 24px;border-bottom:1px solid #1e293b;background:#080812}
+.logo{display:flex;align-items:center;gap:10px;font-weight:600;font-size:15px}
+.logo-icon{width:32px;height:32px;background:linear-gradient(135deg,#6B4FBB,#8B6FDB);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px}
+.subtitle{font-size:12px;color:#64748b;margin-top:1px}
+.user-pill{font-size:12px;color:#94a3b8;background:#1e293b;padding:4px 12px;border-radius:20px;display:flex;align-items:center;gap:8px}
+.signout-btn{background:none;border:none;color:#ef4444;cursor:pointer;font-size:12px;padding:0}
+.container{max-width:1300px;margin:0 auto;padding:24px}
+.stats-row{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:24px}
+.stat-card{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:16px 20px}
+.stat-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;margin-bottom:6px}
+.stat-value{font-size:26px;font-weight:600;color:#e2e8f0}
+.stat-value.green{color:#22c55e}.stat-value.red{color:#ef4444}.stat-value.amber{color:#f59e0b}
+.card{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:20px;margin-bottom:20px}
+.card-title{font-size:14px;font-weight:600;color:#94a3b8;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+.form-row{display:flex;gap:10px;align-items:center}
+.input{background:#1e293b;border:1px solid #334155;border-radius:7px;padding:9px 14px;color:#e2e8f0;font-size:14px;outline:none;flex:1}
+.input:focus{border-color:#6B4FBB}
+.btn{padding:9px 20px;border-radius:7px;font-size:14px;font-weight:500;cursor:pointer;border:none;transition:.15s}
+.btn-primary{background:#6B4FBB;color:#fff}
+.btn-primary:hover{background:#7c5fcc}
+.btn-sm{padding:5px 12px;font-size:12px;border-radius:5px}
+.btn-stripe{background:#635bff;color:#fff}
+.btn-pdf{background:#22c55e;color:#fff}
+.error-box{background:#1a0a0a;border:1px solid #7f1d1d;border-radius:8px;padding:12px 16px;color:#fca5a5;font-size:13px;margin-bottom:16px}
+.panels{display:none;margin:0 0 0;gap:12px;grid-template-columns:1fr 1fr 1fr}
+.panel{border-radius:10px;overflow:hidden;border:1px solid #1e293b;display:flex;flex-direction:column}
+.phdr{padding:10px 14px;display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:600;border-bottom:1px solid #1e293b}
+.phdr.stripe{background:#1a1a3a;color:#a78bfa}
+.phdr.internal{background:#0f2218;color:#4ade80}
+.pbody{padding:12px;font-family:'Courier New',monospace;font-size:11px;line-height:1.5;white-space:pre-wrap;flex:1;min-height:380px;background:#0a0a14;color:#94a3b8;overflow:auto;margin:0}
+.copybtn{background:#334155;color:#e2e8f0;border:none;border-radius:4px;padding:3px 10px;font-size:11px;cursor:pointer}
+.copybtn:hover{background:#475569}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:10px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#64748b;border-bottom:1px solid #1e293b}
+td{padding:10px 12px;border-bottom:1px solid #0f172a;color:#cbd5e1}
+tr:hover td{background:#0f1a2e}
+.badge{display:inline-block;padding:3px 9px;border-radius:12px;font-size:11px;font-weight:600}
+.badge-pending{background:#422006;color:#fb923c}
+.badge-won{background:#052e16;color:#4ade80}
+.badge-lost{background:#1a0a0a;color:#f87171}
+.badge-other{background:#1e293b;color:#94a3b8}
+.actions-cell{display:flex;gap:6px;align-items:center}
+.spinner{display:none;width:16px;height:16px;border:2px solid #334155;border-top-color:#6B4FBB;border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="logo">
+    <div class="logo-icon">⚡</div>
+    <div>
+      <div>DisputeShield</div>
+      <div class="subtitle">GigRadar &middot; PostHog evidence</div>
+    </div>
+  </div>
+  <div class="user-pill">
+    <?= htmlspecialchars($currentUser) ?>
+    <form method="post" style="display:inline">
+      <button name="signout" class="signout-btn">Sign out</button>
+    </form>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- Stats -->
+  <div class="stats-row">
+    <div class="stat-card"><div class="stat-label">Total</div><div class="stat-value"><?= $stats['total'] ?></div></div>
+    <div class="stat-card"><div class="stat-label">Pending</div><div class="stat-value amber"><?= $stats['pending'] ?></div></div>
+    <div class="stat-card"><div class="stat-label">Won</div><div class="stat-value green"><?= $stats['won'] ?></div></div>
+    <div class="stat-card"><div class="stat-label">Lost</div><div class="stat-value red"><?= $stats['lost'] ?></div></div>
+    <div class="stat-card"><div class="stat-label">Total $</div><div class="stat-value">$<?= number_format($stats['amount']/100,0) ?></div></div>
+  </div>
+
+  <!-- Evidence generator -->
+  <div class="card">
+    <div class="card-title">🔍 Generate Dispute Evidence</div>
+    <?php if ($stripeError): ?>
+      <div class="error-box">⚠ Stripe error: <?= htmlspecialchars($stripeError) ?><br><small>Make sure STRIPE_SECRET_KEY is set in Railway Variables.</small></div>
+    <?php endif; ?>
+    <div class="form-row">
+      <input class="input" id="emailInput" type="email" placeholder="customer@email.com">
+      <select class="input" id="reasonSelect" style="flex:0 0 200px">
+        <option value="fraudulent">Fraudulent</option>
+        <option value="subscription_canceled">Subscription canceled</option>
+        <option value="product_not_received">Product not received</option>
+        <option value="product_unacceptable">Product unacceptable</option>
+        <option value="credit_not_processed">Credit not processed</option>
+        <option value="unrecognized">Unrecognized</option>
+      </select>
+      <button class="btn btn-primary" onclick="generateEvidence()">Generate Evidence</button>
+      <div class="spinner" id="spinner"></div>
+    </div>
+    <div id="errorMsg" style="color:#f87171;font-size:13px;margin-top:10px;display:none"></div>
+    <div style="margin-top:16px">
+      <div class="panels" id="panels">
+        <div class="panel">
+          <div class="phdr stripe">
+            📄 FOR STRIPE — rebuttal letter
+            <button class="copybtn" onclick="doCopy('st',this)">Copy</button>
+          </div>
+          <pre class="pbody" id="st"></pre>
+        </div>
+        <div class="panel">
+          <div class="phdr internal">
+            📊 ACTIVITY LOG — PostHog
+            <button class="copybtn" onclick="doCopy('il',this)">Copy</button>
+          </div>
+          <pre class="pbody" id="il"></pre>
+        </div>
+        <div class="panel" style="border-color:#6B4FBB55">
+          <div class="phdr" style="background:#1a0d33;color:#a78bfa;border-bottom:1px solid #6B4FBB44">
+            💬 INTERCOM — customer communications
+            <button class="copybtn" onclick="doCopy('icl',this)">Copy</button>
+          </div>
+          <pre class="pbody" id="icl" style="background:#0c0818"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Disputes table -->
+  <div class="card">
+    <div class="card-title">
+      All Disputes (<?= count($disputes) ?>)
+      <?php if ($stats['pending'] > 0): ?>
+        <span class="badge badge-pending"><?= $stats['pending'] ?> NEED RESPONSE</span>
+      <?php endif; ?>
+    </div>
+    <table>
+      <thead><tr><th>Date</th><th>Email</th><th>Amount</th><th>Reason</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody>
+      <?php foreach ($disputes as $r):
+        $em = $r['email'];
+        $st = $r['status'];
+        $badgeClass = match(true) {
+            in_array($st, ['warning_needs_response','needs_response']) => 'badge-pending',
+            in_array($st, ['won','warning_closed']) => 'badge-won',
+            in_array($st, ['lost']) => 'badge-lost',
+            default => 'badge-other'
+        };
+        $badgeLabel = match($st) {
+            'needs_response','warning_needs_response' => '⚡ NEEDS RESPONSE',
+            'won' => '✓ WON', 'lost' => '✗ LOST',
+            'under_review','warning_under_review' => 'UNDER REVIEW',
+            default => strtoupper($st)
+        };
+      ?>
+      <tr>
+        <td><?= $r['date'] ?></td>
+        <td><?= htmlspecialchars($em) ?></td>
+        <td>$<?= $r['amount'] ?></td>
+        <td><code style="font-size:11px;color:#94a3b8"><?= htmlspecialchars($r['reason']) ?></code></td>
+        <td><span class="badge <?= $badgeClass ?>"><?= $badgeLabel ?></span></td>
+        <td>
+          <div class="actions-cell">
+            <?php if (in_array($st, ['needs_response','warning_needs_response']) && $em): ?>
+              <button class="btn btn-sm btn-primary"
+                onclick="fillAndGenerate('<?= htmlspecialchars(addslashes($em)) ?>','<?= htmlspecialchars(addslashes($r['reason'])) ?>')">
+                Generate Evidence
+              </button>
+            <?php endif; ?>
+              <a class="btn btn-sm btn-stripe" target="_blank"
+                href="https://dashboard.stripe.com/disputes/<?= urlencode($r['id']) ?>">Stripe ↗</a>
+              <a class="btn btn-sm btn-pdf"
+                href="?action=pdf&email=<?= urlencode($em) ?>&reason=<?= urlencode($r['reason']) ?>&dispute_id=<?= urlencode($r['id']) ?>&dispute_amount=<?= urlencode($r['amount_raw']) ?>">
+                PDF ↓</a>
+          </div>
+        </td>
+      </tr>
+      <?php endforeach; ?>
+      <?php if (empty($disputes)): ?>
+        <tr><td colspan="6" style="text-align:center;color:#334155;padding:32px">No disputes found in Stripe.</td></tr>
+      <?php endif; ?>
+      </tbody>
+    </table>
+  </div>
+
+</div>
+
+<script>
+function generateEvidence() {
+    const email  = document.getElementById('emailInput').value.trim();
+    const reason = document.getElementById('reasonSelect').value;
+    if (!email) { showErr('Enter customer email'); return; }
+    hideErr();
+    document.getElementById('spinner').style.display = 'inline-block';
+    document.getElementById('panels').style.display  = 'none';
+
+    const fd = new FormData();
+    fd.append('action', 'preview');
+    fd.append('email',  email);
+    fd.append('reason', reason);
+
+    fetch('/', { method: 'POST', body: fd })
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) { showErr(data.error); return; }
+            document.getElementById('st').textContent  = data.stripe_text  || '—';
+            document.getElementById('il').textContent  = data.internal_log || '—';
+            document.getElementById('icl').textContent = data.intercom_log || (data.intercom && !data.intercom.found ? '(Not in Intercom)' : '—');
+            document.getElementById('panels').style.display = 'grid';
+        })
+        .catch(e => showErr('Request failed: ' + e.message))
+        .finally(() => { document.getElementById('spinner').style.display = 'none'; });
+}
+
+function fillAndGenerate(email, reason) {
+    document.getElementById('emailInput').value = email;
+    document.getElementById('reasonSelect').value = reason;
+    generateEvidence();
+    document.getElementById('panels').scrollIntoView({ behavior: 'smooth' });
+}
+
+function doCopy(id, btn) {
+    const text = document.getElementById(id).textContent;
+    navigator.clipboard.writeText(text).then(() => {
+        btn.textContent = 'Copied!';
+        setTimeout(() => btn.textContent = 'Copy', 1500);
+    });
+}
+
+function showErr(msg) { const el = document.getElementById('errorMsg'); el.textContent = msg; el.style.display = 'block'; }
+function hideErr()    { document.getElementById('errorMsg').style.display = 'none'; }
+</script>
+</body>
+</html>
+<?php
+
+function showLogin(?string $error): void { ?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DisputeShield</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0a0a14;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#111827;border:1px solid #1e293b;border-radius:16px;padding:40px;width:100%;max-width:420px}
+.logo{text-align:center;margin-bottom:28px}
+.logo-icon{width:60px;height:60px;background:linear-gradient(135deg,#6B4FBB,#8B6FDB);border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:28px;margin:0 auto 12px}
+h1{font-size:22px;font-weight:700;text-align:center}
+.sub{font-size:13px;color:#64748b;text-align:center;margin-top:4px}
+label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#64748b;margin:20px 0 6px}
+input{width:100%;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:11px 14px;color:#e2e8f0;font-size:14px;outline:none}
+input:focus{border-color:#6B4FBB}
+.btn{width:100%;margin-top:24px;padding:12px;background:#6B4FBB;color:#fff;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer}
+.btn:hover{background:#7c5fcc}
+.error{background:#1a0a0a;border:1px solid #7f1d1d;border-radius:8px;padding:10px 14px;color:#fca5a5;font-size:13px;margin-top:16px}
+.note{font-size:12px;color:#475569;text-align:center;margin-top:16px}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <div class="logo-icon">⚡</div>
+    <h1>DisputeShield</h1>
+    <div class="sub">GigRadar internal tool</div>
+  </div>
+  <form method="post">
+    <label>Your work email</label>
+    <input type="email" name="login_email" required placeholder="you@gigradar.io">
+    <label>Access code</label>
+    <input type="password" name="login_code" required>
+    <button class="btn" type="submit">Sign in &rarr;</button>
+    <?php if ($error): ?><div class="error"><?= htmlspecialchars($error) ?></div><?php endif; ?>
+  </form>
+  <div class="note">Access restricted to authorized GigRadar team members.</div>
+</div>
+</body>
+</html>
+<?php }
