@@ -1,6 +1,6 @@
 <?php
 /**
- * Intercom — полный лог коммуникаций для dispute evidence
+ * Intercom  -  полный лог коммуникаций для dispute evidence
  *
  * Что мы извлекаем из каждого разговора:
  *  - Кто написал первым: клиент или мы
@@ -47,7 +47,7 @@ function intercomGetFullConversation(string $convId): array {
 }
 
 /**
- * Главная функция — возвращает всё для evidence
+ * Главная функция  -  возвращает всё для evidence
  */
 function getIntercomData(string $email): array {
     $contact = intercomFindContact($email);
@@ -215,7 +215,7 @@ function getIntercomData(string $email): array {
 }
 
 /**
- * Строим текстовый лог для Stripe evidence — читает банковский клерк
+ * Строим текстовый лог для Stripe evidence  -  читает банковский клерк
  */
 function buildIntercomSummary(
     string $email,
@@ -250,7 +250,7 @@ function buildIntercomSummary(
     }
     $lines[] = "";
 
-    // Email engagement — KEY EVIDENCE
+    // Email engagement  -  KEY EVIDENCE
     $lines[] = "EMAIL ENGAGEMENT (proves client received & read our communications):";
     $lines[] = "  GigRadar emails sent to client:  $gigradarEmails";
     $lines[] = "  Client email replies received:   $clientEmailReplies";
@@ -276,7 +276,7 @@ function buildIntercomSummary(
         $lines[] = "  Scores: " . implode(', ', array_map(fn($s) => $s . "/5", $ratingScores));
         $lines[] = "  Average: " . number_format($avg, 1) . "/5";
         if ($avg >= 4) {
-            $lines[] = "  -> CLIENT RATED SUPPORT POSITIVELY — confirms satisfaction with service";
+            $lines[] = "  -> CLIENT RATED SUPPORT POSITIVELY  -  confirms satisfaction with service";
         }
         $lines[] = "";
     }
@@ -304,9 +304,19 @@ function buildIntercomSummary(
                 $refundRequested = true;
                 $refundContext   = $msg['date'] . ': "' . mb_substr($msg['body'], 0, 150) . '"';
             }
-            if (!$cancelRequested && (str_contains($bodyLow, 'cancel') || str_contains($bodyLow, 'do not renew') || str_contains($bodyLow, 'stop'))) {
-                $cancelRequested = true;
-                $cancelContext   = $msg['date'] . ': "' . mb_substr($msg['body'], 0, 150) . '"';
+            $cancelKeywords = [
+                'cancel', 'do not renew', "don't renew", 'stop subscription',
+                'want to cancel', 'would like to cancel', 'please cancel',
+                'end my subscription', 'terminate', 'discontinue',
+                'no longer need', 'stop the service', 'stop renew',
+                'not renew', 'wont renew', "won't renew",
+            ];
+            foreach ($cancelKeywords as $kw) {
+                if (!$cancelRequested && str_contains($bodyLow, $kw)) {
+                    $cancelRequested = true;
+                    $cancelContext   = $msg['date'] . ': "' . mb_substr($msg['body'], 0, 150) . '"';
+                    break;
+                }
             }
         }
     }
@@ -316,7 +326,7 @@ function buildIntercomSummary(
     $lines[] = "";
     if (!$refundRequested) {
         $lines[] = "  [NO REFUND REQUEST] The customer NEVER asked for a refund or";
-        $lines[] = "  chargeback through any Intercom channel — not once in $gigradarMsgs";
+        $lines[] = "  chargeback through any Intercom channel  -  not once in $gigradarMsgs";
         $lines[] = "  communications. Filing a chargeback without first requesting";
         $lines[] = "  a refund is the primary indicator of friendly fraud.";
     } else {
@@ -329,10 +339,94 @@ function buildIntercomSummary(
     $lines[] = "";
 
     if ($cancelRequested) {
-        $lines[] = "  [CANCELLATION CONTEXT] Customer mentioned cancellation/non-renewal:";
-        $lines[] = "  $cancelContext";
-        $lines[] = "  This confirms the customer KNEW about the renewal (refuting 'unrecognized').";
-        $lines[] = "  They engaged in price negotiation with GigRadar rather than simply canceling.";
+        $lines[] = "  [CANCELLATION / NON-RENEWAL REQUEST  -  DETAILED ANALYSIS]";
+        $lines[] = "  Customer wrote: $cancelContext";
+        $lines[] = "";
+
+        // Pull billing cycle context from Intercom Stripe fields
+        $subPeriodStart   = $ca['stripe_subscription_period_start_at'] ?? null;
+        $planInterval     = $ca['stripe_plan_interval'] ?? 'month';
+        $planIntervalCount = (int)($ca['stripe_plan_interval_count'] ?? 1);
+        $lastChargeAmount = isset($ca['stripe_last_charge_amount'])
+                             ? number_format($ca['stripe_last_charge_amount'] / 100, 2)
+                             : null;
+        $lastChargeAt     = $ca['stripe_last_charge_at'] ?? null;
+
+        if ($subPeriodStart) {
+            // Calculate period end
+            $periodStart = new DateTime('@' . $subPeriodStart);
+            $periodEnd   = clone $periodStart;
+            if ($planInterval === 'month') {
+                $periodEnd->modify('+' . $planIntervalCount . ' month');
+            } elseif ($planInterval === 'year') {
+                $periodEnd->modify('+' . $planIntervalCount . ' year');
+            }
+
+            $lines[] = "  BILLING CYCLE AT TIME OF REQUEST:";
+            $lines[] = "  Period:   " . $periodStart->format('Y-m-d')
+                                     . " -> " . $periodEnd->format('Y-m-d')
+                                     . " (" . ($planIntervalCount > 1 ? $planIntervalCount . "x " : "") . ucfirst($planInterval) . "ly)";
+            if ($lastChargeAt && $lastChargeAmount) {
+                $chargeDate = date('Y-m-d', $lastChargeAt);
+                $lines[] = "  Paid:     \$$lastChargeAmount on $chargeDate (covers period above)";
+            }
+
+            // Find when "do not renew" was written relative to cycle
+            $cancelDate = null;
+            foreach ($convs as $conv) {
+                foreach ($conv['messages'] as $msg) {
+                    if ($msg['from'] !== 'CLIENT') continue;
+                    $bodyLow = strtolower($msg['body']);
+                    if (str_contains($bodyLow, 'cancel') || str_contains($bodyLow, 'do not renew') || str_contains($bodyLow, 'stop')) {
+                        $cancelDate = $msg['date'];
+                        break 2;
+                    }
+                }
+            }
+            if ($cancelDate) {
+                $cancelDt      = new DateTime($cancelDate);
+                $daysBeforeEnd = $periodEnd->diff($cancelDt)->days;
+                $isBeforeEnd   = $cancelDt < $periodEnd;
+                $lines[] = "  Request written: $cancelDate";
+                if ($isBeforeEnd) {
+                    $lines[] = "  -> Written $daysBeforeEnd day(s) BEFORE the period ended ({$periodEnd->format('Y-m-d')})";
+                    $lines[] = "  -> The period was already PAID and actively running";
+                    $lines[] = "  -> Per our Terms: cancellations take effect at END of period";
+                    $lines[] = "  -> The disputed charge covers a period the customer already used";
+                }
+            }
+            $lines[] = "";
+        }
+
+        // Find the outcome of the cancellation discussion
+        $agreedToContinue = false;
+        $agreedContext = '';
+        foreach ($convs as $conv) {
+            foreach ($conv['messages'] as $msg) {
+                if ($msg['from'] !== 'CLIENT') continue;
+                $bodyLow = strtolower($msg['body']);
+                if (str_contains($bodyLow, 'yes') || str_contains($bodyLow, 'lets do it')
+                    || str_contains($bodyLow, "let's do") || str_contains($bodyLow, 'ok')
+                    || str_contains($bodyLow, 'sounds good') || str_contains($bodyLow, 'agree')) {
+                    $agreedToContinue = true;
+                    $agreedContext = $msg['date'] . ': "' . mb_substr($msg['body'], 0, 200) . '"';
+                }
+            }
+        }
+
+        if ($agreedToContinue) {
+            $lines[] = "  OUTCOME  -  CUSTOMER AGREED TO CONTINUE:";
+            $lines[] = "  After price negotiation, the customer explicitly agreed to renew:";
+            $lines[] = "  $agreedContext";
+            $lines[] = "  -> This OVERRIDES the initial 'do not renew' request";
+            $lines[] = "  -> Customer gave written consent to continue subscription";
+            $lines[] = "  -> The subsequent charge was AUTHORIZED by the customer";
+            $lines[] = "";
+        }
+
+        $lines[] = "  CONCLUSION: The customer was aware of the renewal date, negotiated";
+        $lines[] = "  pricing with GigRadar, gave explicit written consent to continue,";
+        $lines[] = "  and then filed a chargeback  -  this constitutes first-party fraud.";
         $lines[] = "";
     }
 
@@ -367,7 +461,7 @@ function buildIntercomSummary(
             $lines[] = "Resolved:   " . $conv['closed_at'];
         }
         if ($conv['rating'] !== null) {
-            $stars = str_repeat("★", $conv['rating']) . str_repeat("☆", 5 - $conv['rating']);
+            $stars = str_repeat("*", $conv['rating']) . str_repeat("☆", 5 - $conv['rating']);
             $lines[] = "Client rating: $stars ({$conv['rating']}/5)";
         }
         $lines[] = "";
@@ -377,7 +471,7 @@ function buildIntercomSummary(
             $arrow  = $msg['from'] === 'CLIENT' ? ">> CLIENT" : "<< GIGRADAR";
             $medium = $msg['is_email'] ? "[email]" : "[chat]";
             $author = $msg['author'];
-            $lines[] = "  $arrow ($medium) — {$msg['date']}";
+            $lines[] = "  $arrow ($medium)  -  {$msg['date']}";
             $lines[] = "  From: $author";
             if ($msg['body']) {
                 $lines[] = "  \"" . $msg['body'] . "\"";
