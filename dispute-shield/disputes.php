@@ -72,7 +72,7 @@ function enrichWithStripe(array &$u, string $email): void {
         $total = 0;
         $prior = [];
         foreach ($allCharges->data as $ch) {
-            if ($ch->status === 'succeeded' && !$ch->refunded) $total += $ch->amount;
+            if ($ch->status === 'succeeded') $total += $ch->amount; // include disputed/refunded — shows total billed
             if ($ch->status === 'succeeded' && empty($ch->dispute)) {
                 $prior[] = ['date' => date('Y-m-d', $ch->created), 'amount' => number_format($ch->amount / 100, 2), 'id' => $ch->id];
             }
