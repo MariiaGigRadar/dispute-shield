@@ -55,7 +55,41 @@ function getPostHogUser(string $email): array {
 
     $row = $main[0] ?? null;
     if (!$row || (empty($row[14]) && empty($row[15]))) {
-        return ['found' => false];
+        // PostHog returned nothing — return minimal structure so Stripe/Intercom data still shows
+        return [
+            'found'                  => false,
+            'name'                   => '',
+            'email'                  => $email,
+            'signup_date'            => 'unknown',
+            'autobidder_setup_date'  => 'never',
+            'first_scanner_date'     => 'never',
+            'first_reply_date'       => 'never',
+            'subscription_start'     => 'unknown',
+            'subscription_canceled'  => null,
+            'last_active'            => 'unknown',
+            'last_pageview'          => 'unknown',
+            'total_replies'          => 0,
+            'proposals_sent'         => 0,
+            'scanners_created'       => 0,
+            'no_connects_events'     => 0,
+            'autobidder_configs'     => 0,
+            'total_pageviews'        => 0,
+            'dashboard_switches'     => 0,
+            'lessons_completed'      => 0,
+            'gigs_searches'          => 0,
+            'plan'                   => '',
+            'total_paid_usd'         => '0.00',
+            'mrr'                    => 0,
+            'is_canceled'            => false,
+            'stripe_subscription_status' => '',
+            'geo_country'            => '',
+            'geo_city'               => '',
+            'referring_domain'       => '',
+            'signup_url'             => '',
+            'sessions_after_payment' => 0,
+            'recent_activity'        => [],
+            'admin_actions'          => [],
+        ];
     }
 
     // Recent activity — meaningful events only
