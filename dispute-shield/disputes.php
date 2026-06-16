@@ -68,6 +68,8 @@ function enrichWithStripe(array &$u, string $email): void {
                 $u['signup_date']        = date('Y-m-d', $sub->start_date);
                 $u['subscription_start'] = date('Y-m-d', $sub->start_date);
             }
+            // Store real Stripe subscription status
+            $u['stripe_subscription_status'] = $sub->status ?? '';
         }
 
         // All charges — total, prior transactions, card info
@@ -99,7 +101,12 @@ function enrichWithStripe(array &$u, string $email): void {
                 }
             }
         }
-        if ($total > 0) $u['total_paid_usd'] = number_format($total / 100, 2);
+        // If all charges were disputed and total=0, use dispute amount as fallback
+        if ($total <= 0 && !empty($u['dispute_amount'])) {
+            $u['total_paid_usd'] = $u['dispute_amount'];
+        } else {
+            $u['total_paid_usd'] = number_format($total / 100, 2);
+        }
         if (count($prior) > 1) $u['prior_transactions'] = array_slice($prior, 1, 5);
 
         // Geo from Intercom if PostHog didn't have it
@@ -121,6 +128,7 @@ if ($action === 'pdf') {
     if (!$email) { http_response_code(400); exit('No email'); }
 
     $u = getPostHogUser($email);
+    $u['dispute_amount'] = trim($_GET['dispute_amount'] ?? '');
     enrichWithStripe($u, $email);
 
     $intercom    = getIntercomData($email);
@@ -145,6 +153,7 @@ if ($action === 'preview') {
     if (!$email) { echo json_encode(['error' => 'No email']); exit; }
 
     $u = getPostHogUser($email);
+    $u['dispute_amount'] = trim($_POST['dispute_amount'] ?? '');
     enrichWithStripe($u, $email);
 
     $intercom    = getIntercomData($email);
@@ -216,12 +225,13 @@ if (STRIPE_SECRET_KEY) {
             elseif (in_array($status, ['lost', 'warning_under_review', 'under_review'])) $stats['lost']++;
 
             $disputes[] = [
-                'id'     => $d->id,
-                'date'   => date('Y-m-d', $d->created),
-                'email'  => $em,
-                'amount' => number_format($chAmt / 100, 2),
-                'reason' => $d->reason,
-                'status' => $status,
+                'id'        => $d->id,
+                'date'      => date('Y-m-d', $d->created),
+                'email'     => $em,
+                'amount'    => number_format($chAmt / 100, 2),
+                'amount_raw'=> number_format($chAmt / 100, 2),
+                'reason'    => $d->reason,
+                'status'    => $status,
             ];
         }
         usort($disputes, fn($a, $b) => strcmp($b['date'], $a['date']));
@@ -406,7 +416,7 @@ tr:hover td{background:#0f1a2e}
               <a class="btn btn-sm btn-stripe" target="_blank"
                 href="https://dashboard.stripe.com/disputes/<?= urlencode($r['id']) ?>">Stripe ↗</a>
               <a class="btn btn-sm btn-pdf"
-                href="?action=pdf&email=<?= urlencode($em) ?>&reason=<?= urlencode($r['reason']) ?>&dispute_id=<?= urlencode($r['id']) ?>">
+                href="?action=pdf&email=<?= urlencode($em) ?>&reason=<?= urlencode($r['reason']) ?>&dispute_id=<?= urlencode($r['id']) ?>&dispute_amount=<?= urlencode($r['amount_raw']) ?>">
                 PDF ↓</a>
           </div>
         </td>
