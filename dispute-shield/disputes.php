@@ -96,7 +96,7 @@ function enrichWithStripe(array &$u, string $email): void {
                 }
             }
         }
-        if ($total > 0) $u['total_paid_usd'] = number_format($total / 100, 2);
+        $u['total_paid_usd'] = $total > 0 ? number_format($total / 100, 2) : '0.00';
         if (count($prior) > 1) $u['prior_transactions'] = array_slice($prior, 1, 5);
 
         $ic = getIntercomData($email);
