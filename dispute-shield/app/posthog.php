@@ -27,7 +27,7 @@ function getPostHogUser(string $email): array {
             min(if(event='auto_bid_reply_received', timestamp, null))        AS first_reply_date,
             min(if(event='subscription_active', timestamp, null))            AS subscription_start,
             max(if(event='subscription_canceled', timestamp, null))          AS subscription_canceled,
-            countIf(event IN ('auto_bid_reply_received', 'reply_received', 'bid_reply_received')) AS total_replies,
+            countIf(event='auto_bid_reply_received')                         AS total_replies,
             countIf(event='usage_recorded')                                  AS proposals_sent,
             countIf(event='scanner_created')                                 AS scanners_created,
             countIf(event='auto_bidder_disabled_no_connects')               AS no_connects_events,
@@ -138,11 +138,11 @@ function getPostHogUser(string $email): array {
         'stripe_subscription_status' => '',  // filled by enrichWithStripe
 
         // Geo & device
-        'geo_country'            => \$row[22] ?? '',
-        'geo_city'               => \$row[23] ?? '',
-        'referring_domain'       => \$row[24] ?? '',
-        'signup_url'             => \$row[25] ?? '',
-        'sessions_after_payment' => (int)(\$row[26] ?? 0),
+        'geo_country'            => $row[22] ?? '',
+        'geo_city'               => $row[23] ?? '',
+        'referring_domain'       => $row[24] ?? '',
+        'signup_url'             => $row[25] ?? '',
+        'sessions_after_payment' => (int)($row[26] ?? 0),
 
         // Activity logs
         'recent_activity'        => array_map(fn($r) => [
