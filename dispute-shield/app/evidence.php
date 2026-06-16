@@ -189,11 +189,8 @@ function buildActivityLog(array $u, string $email): string {
  * Structured for bank reviewers who spend 2-3 minutes per case.
  */
 function buildRebuttalLetter(array $u, string $email, string $reason): string {
-    if (!($u['found'] ?? false)) {
-        return "Customer $email not found in analytics. Contact support@gigradar.io.";
-    }
-
-    $name      = $u['name'] ?: $email;
+    // Proceed even if PostHog data not found — Stripe data still available
+    $name      = ($u['name'] ?? '') ?: $email;
     $proposals = (int)$u['proposals_sent'];
     $replies   = (int)$u['total_replies'];
     $pageviews = (int)$u['total_pageviews'];
