@@ -27,7 +27,7 @@ function getPostHogUser(string $email): array {
             min(if(event='auto_bid_reply_received', timestamp, null))        AS first_reply_date,
             min(if(event='subscription_active', timestamp, null))            AS subscription_start,
             max(if(event='subscription_canceled', timestamp, null))          AS subscription_canceled,
-            countIf(event='auto_bid_reply_received')                         AS total_replies,
+            countIf(event='auto_bid_reply_received' OR event='reply_received' OR event='bid_reply_received') AS total_replies,
             countIf(event='usage_recorded')                                  AS proposals_sent,
             countIf(event='scanner_created')                                 AS scanners_created,
             countIf(event='auto_bidder_disabled_no_connects')               AS no_connects_events,
@@ -42,7 +42,12 @@ function getPostHogUser(string $email): array {
             countIf(event='dashboard_view_switched')                         AS dashboard_switches,
             countIf(event='user_lesson_completed')                           AS lessons_completed,
             countIf(event='get_gigs_time')                                   AS gigs_searches,
-            any(person.properties.plan)                                      AS plan_prop
+            any(person.properties.plan)                                      AS plan_prop,
+            any(person.properties.\$geoip_country_name)                           AS geo_country,
+            any(person.properties.\$geoip_city_name)                              AS geo_city,
+            any(person.properties.\$initial_referring_domain)                     AS referring_domain,
+            any(person.properties.\$initial_current_url)                          AS signup_url,
+            countIf(event='\$pageview' AND timestamp > subscription_start)        AS sessions_after_payment
         FROM events
         WHERE person.properties.email = '$e'
         LIMIT 1
@@ -130,6 +135,13 @@ function getPostHogUser(string $email): array {
         'total_paid_usd'         => $revenue,
         'mrr'                    => $mrr,
         'is_canceled'            => !empty($row[5]),
+
+        // Geo & device
+        'geo_country'            => \$row[22] ?? '',
+        'geo_city'               => \$row[23] ?? '',
+        'referring_domain'       => \$row[24] ?? '',
+        'signup_url'             => \$row[25] ?? '',
+        'sessions_after_payment' => (int)(\$row[26] ?? 0),
 
         // Activity logs
         'recent_activity'        => array_map(fn($r) => [
