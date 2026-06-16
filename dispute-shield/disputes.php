@@ -158,8 +158,6 @@ if ($action === 'preview') {
 $disputes    = [];
 $stats       = ['total' => 0, 'pending' => 0, 'won' => 0, 'lost' => 0, 'amount' => 0];
 $stripeError = null;
-$debugLines  = [];
-
 if (STRIPE_SECRET_KEY) {
     try {
         \Stripe\Stripe::setApiKey(STRIPE_SECRET_KEY);
@@ -190,19 +188,6 @@ if (STRIPE_SECRET_KEY) {
                 }
                 // 3. receipt_email
                 if (!$em) $em = $ch->receipt_email ?? '';
-            }
-
-            // Debug first 2 rows
-            if (count($debugLines) < 2) {
-                $cust      = is_object($ch) ? ($ch->customer ?? null) : null;
-                $custEmail = is_object($cust) ? ($cust->email ?? 'obj_no_email') : (is_string($cust) ? 'str:'.$cust : 'null');
-                $debugLines[] = sprintf(
-                    'ch=%s | bd=%s | cust=%s | em=%s',
-                    is_object($ch) ? substr($ch->id, 0, 14) : 'not_obj',
-                    var_export(is_object($ch) ? ($ch->billing_details->email ?? null) : null, true),
-                    $custEmail,
-                    $em ?: 'EMPTY'
-                );
             }
 
             $status = $d->status;
@@ -308,13 +293,6 @@ tr:hover td{background:#0f1a2e}
 
   <?php if ($stripeError): ?>
     <div class="error-box">⚠ Stripe error: <?= htmlspecialchars($stripeError) ?></div>
-  <?php endif; ?>
-
-  <?php if (!empty($debugLines)): ?>
-  <div class="debug-box">
-    <b style="color:#4ade80">DEBUG:</b><br>
-    <?php foreach ($debugLines as $l): ?><?= htmlspecialchars($l) ?><br><?php endforeach; ?>
-  </div>
   <?php endif; ?>
 
   <!-- Stats -->
