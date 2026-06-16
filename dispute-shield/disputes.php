@@ -398,15 +398,11 @@ tr:hover td{background:#0f1a2e}
                 Generate Evidence
               </button>
             <?php endif; ?>
-            <?php if ($em): ?>
               <a class="btn btn-sm btn-stripe" target="_blank"
                 href="https://dashboard.stripe.com/disputes/<?= urlencode($r['id']) ?>">Stripe ↗</a>
               <a class="btn btn-sm btn-pdf"
                 href="?action=pdf&email=<?= urlencode($em) ?>&reason=<?= urlencode($r['reason']) ?>&dispute_id=<?= urlencode($r['id']) ?>">
                 PDF ↓</a>
-            <?php else: ?>
-              <span style="color:#334155;font-size:12px">—</span>
-            <?php endif; ?>
           </div>
         </td>
       </tr>
