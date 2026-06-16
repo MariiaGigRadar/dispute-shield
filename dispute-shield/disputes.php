@@ -1,5 +1,4 @@
 <?php
-require_once __DIR__ . '/vendor/autoload.php';
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/app/posthog.php';
 require_once __DIR__ . '/app/evidence.php';
@@ -7,7 +6,7 @@ require_once __DIR__ . '/app/intercom.php';
 
 session_start();
 
-// ── Auth ───────────────────────────────────────────────────────────────────
+// ── Auth ──────────────────────────────────────────────────────────────────
 $allowedEmails = ['maria@gigradar.io', 'vadym@gigradar.io', 'antonina@gigradar.io'];
 $secretCode    = 'vadym27039';
 
@@ -33,21 +32,19 @@ if (empty($_SESSION['gr_user'])) {
 $currentUser = $_SESSION['gr_user'];
 $action      = $_GET['action'] ?? 'list';
 
-// ── Helper: get Stripe customer by email or Intercom stripe_id ─────────────
+// ── Helper: get Stripe customer ───────────────────────────────────────────
 function getStripeCustomer(string $email): ?object {
     if (!STRIPE_SECRET_KEY) return null;
     \Stripe\Stripe::setApiKey(STRIPE_SECRET_KEY);
-    // Try Intercom stripe_id first
     $ic = getIntercomData($email);
     if (!empty($ic['stripe_id'])) {
         try { return \Stripe\Customer::retrieve($ic['stripe_id']); } catch (\Exception $e) {}
     }
-    // Fallback: email search
     $res = \Stripe\Customer::search(['query' => 'email:"' . $email . '"', 'limit' => 1]);
     return $res->data[0] ?? null;
 }
 
-// ── Helper: enrich user array with Stripe data ─────────────────────────────
+// ── Helper: enrich with Stripe ────────────────────────────────────────────
 function enrichWithStripe(array &$u, string $email): void {
     if (!STRIPE_SECRET_KEY) return;
     try {
@@ -55,9 +52,9 @@ function enrichWithStripe(array &$u, string $email): void {
         $cust = getStripeCustomer($email);
         if (!$cust) return;
 
-        // Plan + subscription start
         $subs = \Stripe\Subscription::all(['customer' => $cust->id, 'limit' => 1, 'status' => 'all']);
         foreach ($subs->data as $sub) {
+            $u['stripe_subscription_status'] = $sub->status ?? '';
             $interval = $sub->items->data[0]->price->recurring->interval ?? '';
             $prodId   = $sub->items->data[0]->price->product ?? '';
             try {
@@ -68,11 +65,8 @@ function enrichWithStripe(array &$u, string $email): void {
                 $u['signup_date']        = date('Y-m-d', $sub->start_date);
                 $u['subscription_start'] = date('Y-m-d', $sub->start_date);
             }
-            // Store real Stripe subscription status
-            $u['stripe_subscription_status'] = $sub->status ?? '';
         }
 
-        // All charges — total, prior transactions, card info
         $allCharges = \Stripe\Charge::all(['customer' => $cust->id, 'limit' => 100]);
         $total = 0;
         $prior = [];
@@ -101,26 +95,18 @@ function enrichWithStripe(array &$u, string $email): void {
                 }
             }
         }
-        // If all charges were disputed and total=0, use dispute amount as fallback
-        if ($total <= 0 && !empty($u['dispute_amount'])) {
-            $u['total_paid_usd'] = $u['dispute_amount'];
-        } else {
-            $u['total_paid_usd'] = number_format($total / 100, 2);
-        }
+        if ($total > 0) $u['total_paid_usd'] = number_format($total / 100, 2);
         if (count($prior) > 1) $u['prior_transactions'] = array_slice($prior, 1, 5);
 
-        // Geo from Intercom if PostHog didn't have it
         $ic = getIntercomData($email);
         if (empty($u['geo_country']) && !empty($ic['location']['country'])) {
             $u['geo_country'] = $ic['location']['country'];
             $u['geo_city']    = $ic['location']['city'] ?? '';
         }
-    } catch (\Exception $e) {
-        // Stripe unavailable
-    }
+    } catch (\Exception $e) {}
 }
 
-// ── PDF download ───────────────────────────────────────────────────────────
+// ── PDF download ──────────────────────────────────────────────────────────
 if ($action === 'pdf') {
     require_once __DIR__ . '/app/pdf.php';
     $email  = trim($_GET['email'] ?? '');
@@ -128,7 +114,6 @@ if ($action === 'pdf') {
     if (!$email) { http_response_code(400); exit('No email'); }
 
     $u = getPostHogUser($email);
-    $u['dispute_amount'] = trim($_GET['dispute_amount'] ?? '');
     enrichWithStripe($u, $email);
 
     $intercom    = getIntercomData($email);
@@ -146,14 +131,13 @@ if ($action === 'pdf') {
     exit;
 }
 
-// ── Preview (AJAX) ─────────────────────────────────────────────────────────
+// ── Preview (AJAX) ────────────────────────────────────────────────────────
 if ($action === 'preview') {
     header('Content-Type: application/json');
     $email = trim($_POST['email'] ?? '');
     if (!$email) { echo json_encode(['error' => 'No email']); exit; }
 
     $u = getPostHogUser($email);
-    $u['dispute_amount'] = trim($_POST['dispute_amount'] ?? '');
     enrichWithStripe($u, $email);
 
     $intercom    = getIntercomData($email);
@@ -169,51 +153,55 @@ if ($action === 'preview') {
     exit;
 }
 
-// ── Dispute list from Stripe ───────────────────────────────────────────────
+// ── Dispute list from Stripe ──────────────────────────────────────────────
 $disputes    = [];
 $stats       = ['total' => 0, 'pending' => 0, 'won' => 0, 'lost' => 0, 'amount' => 0];
 $stripeError = null;
+$debugLines  = [];
 
 if (STRIPE_SECRET_KEY) {
     try {
         \Stripe\Stripe::setApiKey(STRIPE_SECRET_KEY);
 
-        $list = \Stripe\Dispute::all(['limit' => 100]);
-        $debugLines = [];
+        // Single call — expand charge + customer in one shot
+        $list = \Stripe\Dispute::all([
+            'limit'  => 100,
+            'expand' => ['data.charge.customer'],
+        ]);
+
         foreach ($list->data as $d) {
             $em    = '';
             $chAmt = $d->amount;
-            try {
-                $ch = \Stripe\Charge::retrieve([
-                    'id'     => $d->charge,
-                    'expand' => ['customer', 'billing_details'],
-                ]);
-                $billingEmail  = $ch->billing_details->email ?? null;
-                $receiptEmail  = $ch->receipt_email ?? null;
-                $customerRaw   = $ch->customer ?? null;
-                $customerEmail = null;
-                $customerType  = gettype($customerRaw);
-                if (is_object($customerRaw)) {
-                    $customerEmail = $customerRaw->email ?? null;
-                } elseif (is_string($customerRaw) && $customerRaw) {
-                    $cObj = \Stripe\Customer::retrieve($customerRaw);
-                    $customerEmail = $cObj->email ?? null;
-                    $customerType  = 'string→' . ($customerEmail ? 'found' : 'no_email');
+
+            $ch = $d->charge ?? null; // expanded Charge object
+            if (is_object($ch)) {
+                // 1. billing_details.email
+                $em = $ch->billing_details->email ?? '';
+                // 2. customer.email (already expanded)
+                if (!$em) {
+                    $cust = $ch->customer ?? null;
+                    if (is_object($cust)) {
+                        $em = $cust->email ?? '';
+                    } elseif (is_string($cust) && $cust) {
+                        // fallback: retrieve if not expanded
+                        try { $em = \Stripe\Customer::retrieve($cust)->email ?? ''; } catch (\Exception $e2) {}
+                    }
                 }
-                $em = $billingEmail ?? $customerEmail ?? $receiptEmail ?? '';
-                if (count($debugLines) < 3) {
-                    $debugLines[] = sprintf(
-                        'charge=%s | billing=%s | receipt=%s | cust_type=%s | cust_email=%s → em=%s',
-                        $d->charge,
-                        var_export($billingEmail, true),
-                        var_export($receiptEmail, true),
-                        $customerType,
-                        var_export($customerEmail, true),
-                        $em ?: '[EMPTY]'
-                    );
-                }
-            } catch (\Exception $e) {
-                if (count($debugLines) < 3) $debugLines[] = 'ERROR: ' . $e->getMessage();
+                // 3. receipt_email
+                if (!$em) $em = $ch->receipt_email ?? '';
+            }
+
+            // Debug first 2 rows
+            if (count($debugLines) < 2) {
+                $cust      = is_object($ch) ? ($ch->customer ?? null) : null;
+                $custEmail = is_object($cust) ? ($cust->email ?? 'obj_no_email') : (is_string($cust) ? 'str:'.$cust : 'null');
+                $debugLines[] = sprintf(
+                    'ch=%s | bd=%s | cust=%s | em=%s',
+                    is_object($ch) ? substr($ch->id, 0, 14) : 'not_obj',
+                    var_export(is_object($ch) ? ($ch->billing_details->email ?? null) : null, true),
+                    $custEmail,
+                    $em ?: 'EMPTY'
+                );
             }
 
             $status = $d->status;
@@ -224,24 +212,23 @@ if (STRIPE_SECRET_KEY) {
             elseif (in_array($status, ['lost', 'warning_under_review', 'under_review'])) $stats['lost']++;
 
             $disputes[] = [
-                'id'        => $d->id,
-                'date'      => date('Y-m-d', $d->created),
-                'email'     => $em,
-                'amount'    => number_format($chAmt / 100, 2),
-                'amount_raw'=> number_format($chAmt / 100, 2),
-                'reason'    => $d->reason,
-                'status'    => $status,
+                'id'         => $d->id,
+                'date'       => date('Y-m-d', $d->created),
+                'email'      => $em,
+                'amount'     => number_format($chAmt / 100, 2),
+                'amount_raw' => number_format($chAmt / 100, 2),
+                'reason'     => $d->reason,
+                'status'     => $status,
             ];
         }
         usort($disputes, fn($a, $b) => strcmp($b['date'], $a['date']));
-
 
     } catch (\Exception $e) {
         $stripeError = $e->getMessage();
     }
 }
 
-// ── HTML output ────────────────────────────────────────────────────────────
+// ── HTML output ───────────────────────────────────────────────────────────
 ?><!DOCTYPE html>
 <html lang="en">
 <head>
@@ -275,7 +262,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .btn-stripe{background:#635bff;color:#fff}
 .btn-pdf{background:#22c55e;color:#fff}
 .error-box{background:#1a0a0a;border:1px solid #7f1d1d;border-radius:8px;padding:12px 16px;color:#fca5a5;font-size:13px;margin-bottom:16px}
-.panels{display:none;margin:0 0 0;gap:12px;grid-template-columns:1fr 1fr 1fr}
+.debug-box{background:#0a1a0a;border:1px solid #166534;border-radius:8px;padding:12px 16px;color:#86efac;font-family:monospace;font-size:11px;line-height:1.8;margin-bottom:16px}
+.panels{display:none;margin:0;gap:12px;grid-template-columns:1fr 1fr 1fr}
 .panel{border-radius:10px;overflow:hidden;border:1px solid #1e293b;display:flex;flex-direction:column}
 .phdr{padding:10px 14px;display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:600;border-bottom:1px solid #1e293b}
 .phdr.stripe{background:#1a1a3a;color:#a78bfa}
@@ -304,7 +292,7 @@ tr:hover td{background:#0f1a2e}
     <div class="logo-icon">⚡</div>
     <div>
       <div>DisputeShield</div>
-      <div class="subtitle">GigRadar &middot; PostHog evidence</div>
+      <div class="subtitle">GigRadar · PostHog evidence</div>
     </div>
   </div>
   <div class="user-pill">
@@ -317,10 +305,14 @@ tr:hover td{background:#0f1a2e}
 
 <div class="container">
 
+  <?php if ($stripeError): ?>
+    <div class="error-box">⚠ Stripe error: <?= htmlspecialchars($stripeError) ?></div>
+  <?php endif; ?>
+
   <?php if (!empty($debugLines)): ?>
-  <div style="background:#0a1a0a;border:1px solid #166534;border-radius:8px;padding:12px 16px;margin-bottom:16px;font-family:monospace;font-size:11px;color:#86efac;line-height:1.8">
-    <b style="color:#4ade80">DEBUG — first 3 charges:</b><br>
-    <?php foreach ($debugLines as $line): ?><?= htmlspecialchars($line) ?><br><?php endforeach; ?>
+  <div class="debug-box">
+    <b style="color:#4ade80">DEBUG:</b><br>
+    <?php foreach ($debugLines as $l): ?><?= htmlspecialchars($l) ?><br><?php endforeach; ?>
   </div>
   <?php endif; ?>
 
@@ -336,10 +328,6 @@ tr:hover td{background:#0f1a2e}
   <!-- Evidence generator -->
   <div class="card">
     <div class="card-title">🔍 Generate Dispute Evidence</div>
-    <?php if ($stripeError): ?>
-      <div class="error-box">⚠ Stripe error: <?= htmlspecialchars($stripeError) ?><br><small>Make sure STRIPE_SECRET_KEY is set in Railway Variables.</small></div>
-    <?php endif; ?>
-
     <div class="form-row">
       <input class="input" id="emailInput" type="email" placeholder="customer@email.com">
       <select class="input" id="reasonSelect" style="flex:0 0 200px">
@@ -416,17 +404,19 @@ tr:hover td{background:#0f1a2e}
         <td><span class="badge <?= $badgeClass ?>"><?= $badgeLabel ?></span></td>
         <td>
           <div class="actions-cell">
-            <?php if (in_array($st, ['needs_response','warning_needs_response']) && $em): ?>
+            <?php if ($em): ?>
               <button class="btn btn-sm btn-primary"
                 onclick="fillAndGenerate('<?= htmlspecialchars(addslashes($em)) ?>','<?= htmlspecialchars(addslashes($r['reason'])) ?>')">
                 Generate Evidence
               </button>
-            <?php endif; ?>
               <a class="btn btn-sm btn-stripe" target="_blank"
                 href="https://dashboard.stripe.com/disputes/<?= urlencode($r['id']) ?>">Stripe ↗</a>
               <a class="btn btn-sm btn-pdf"
-                href="?action=pdf&email=<?= urlencode($em) ?>&reason=<?= urlencode($r['reason']) ?>&dispute_id=<?= urlencode($r['id']) ?>&dispute_amount=<?= urlencode($r['amount_raw']) ?>">
+                href="?action=pdf&email=<?= urlencode($em) ?>&reason=<?= urlencode($r['reason']) ?>&dispute_id=<?= urlencode($r['id']) ?>">
                 PDF ↓</a>
+            <?php else: ?>
+              <span style="color:#334155;font-size:12px">—</span>
+            <?php endif; ?>
           </div>
         </td>
       </tr>
