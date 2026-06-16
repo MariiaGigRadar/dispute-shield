@@ -178,59 +178,17 @@ if (STRIPE_SECRET_KEY) {
     try {
         \Stripe\Stripe::setApiKey(STRIPE_SECRET_KEY);
 
-        // Get all disputes
-        $rawList = \Stripe\Dispute::all(['limit' => 100]);
-
-        // Build customer_id → email map using Customer::retrieve per unique customer
-        // Disputes have charge.customer — retrieve each unique customer ID once
-        $custEmailCache = [];
-
-        // First pass: collect unique customer IDs from charges (no expand needed)
-        foreach ($rawList->data as $d) {
-            $chId = $d->charge;
-            if (!$chId) continue;
-            try {
-                $ch = \Stripe\Charge::retrieve($chId); // no expand, just get charge
-                $custId = is_object($ch->customer) ? $ch->customer->id : ($ch->customer ?? '');
-                if ($custId && !isset($custEmailCache[$custId])) {
-                    $custEmailCache[$custId] = null; // mark as needed
-                }
-            } catch (\Exception $e) {}
-        }
-
-        // Fetch each unique customer once
-        foreach (array_keys($custEmailCache) as $custId) {
-            try {
-                $cObj = \Stripe\Customer::retrieve($custId);
-                $custEmailCache[$custId] = $cObj->email ?? '';
-            } catch (\Exception $e) {
-                $custEmailCache[$custId] = '';
-            }
-        }
-
-        // Second pass: build charge→email map
-        $chargeEmailMap = [];
-        foreach ($rawList->data as $d) {
-            $chId = $d->charge;
-            if (!$chId) { $chargeEmailMap[$chId] = ''; continue; }
-            try {
-                $ch = \Stripe\Charge::retrieve($chId);
-                $em = $ch->billing_details->email ?? '';
-                if (!$em) {
-                    $custId = is_object($ch->customer) ? $ch->customer->id : ($ch->customer ?? '');
-                    $em = $custEmailCache[$custId] ?? '';
-                }
-                if (!$em && !empty($ch->receipt_email)) $em = $ch->receipt_email;
-                $chargeEmailMap[$chId] = $em;
-            } catch (\Exception $e) {
-                $chargeEmailMap[$chId] = '';
-            }
-        }
-
-        // Build dispute rows
-        foreach ($rawList->data as $d) {
-            $em    = $chargeEmailMap[$d->charge] ?? '';
+        $list = \Stripe\Dispute::all(['limit' => 100]);
+        foreach ($list->data as $d) {
+            $em    = '';
             $chAmt = $d->amount;
+            try {
+                $ch = \Stripe\Charge::retrieve([
+                    'id'     => $d->charge,
+                    'expand' => ['customer', 'billing_details'],
+                ]);
+                $em = $ch->billing_details->email ?? ($ch->customer->email ?? '');
+            } catch (\Exception $e) {}
 
             $status = $d->status;
             $stats['total']++;
