@@ -176,26 +176,30 @@ if (STRIPE_SECRET_KEY) {
             try {
                 $ch = \Stripe\Charge::retrieve([
                     'id'     => $d->charge,
-                    'expand' => ['customer', 'invoice', 'payment_intent'],
+                    'expand' => ['customer'],
                 ]);
-                // Try multiple sources for email
+                // Source 1: billing_details
                 $em = $ch->billing_details->email ?? '';
-                if (!$em && !empty($ch->customer)) {
-                    $em = is_object($ch->customer) ? ($ch->customer->email ?? '') : '';
+                // Source 2: expanded customer object
+                if (!$em) {
+                    $cust = $ch->customer ?? null;
+                    if (is_object($cust) && !empty($cust->email)) {
+                        $em = $cust->email;
+                    } elseif (is_string($cust) && $cust) {
+                        // customer is just an ID string - retrieve it
+                        try {
+                            $cObj = \Stripe\Customer::retrieve($cust);
+                            $em   = $cObj->email ?? '';
+                        } catch (\Exception $e2) {}
+                    }
                 }
+                // Source 3: receipt_email on charge
                 if (!$em && !empty($ch->receipt_email)) {
                     $em = $ch->receipt_email;
                 }
+                // Source 4: metadata
                 if (!$em && !empty($ch->metadata['email'])) {
                     $em = $ch->metadata['email'];
-                }
-                // Last resort: lookup customer directly
-                if (!$em && !empty($ch->customer)) {
-                    $custId = is_object($ch->customer) ? $ch->customer->id : $ch->customer;
-                    if ($custId) {
-                        $cObj = \Stripe\Customer::retrieve($custId);
-                        $em   = $cObj->email ?? '';
-                    }
                 }
             } catch (\Exception $e) {}
 
