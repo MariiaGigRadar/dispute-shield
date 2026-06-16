@@ -134,7 +134,14 @@ function buildActivityLog(array $u, string $email): string {
     $lines[] = "FINANCIAL:";
     $lines[] = "  Subscription plan:   " . $u['plan'];
     $lines[] = "  Total billed:        $" . $u['total_paid_usd'] . " USD";
-    $lines[] = "  Subscription status: " . ($u['is_canceled'] ? "Canceled " . $u['subscription_canceled'] : "ACTIVE");
+    $strSt = strtolower($u['stripe_subscription_status'] ?? '');
+    if (in_array($strSt, ['canceled', 'cancelled'])) {
+        $lines[] = "  Subscription status: CANCELED (confirmed via Stripe)";
+    } elseif ($u['is_canceled'] && $u['subscription_canceled']) {
+        $lines[] = "  Subscription status: Canceled " . $u['subscription_canceled'];
+    } else {
+        $lines[] = "  Subscription status: ACTIVE";
+    }
 
         // Card & identity
     if (!empty($u['card_last4'])) {
