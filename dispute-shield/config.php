@@ -1,6 +1,7 @@
 <?php
 // Все секреты берутся из переменных окружения Railway
 // Не храни ключи прямо в коде!
+require_once __DIR__ . '/vendor/autoload.php';
 
 define('STRIPE_SECRET_KEY',   getenv('STRIPE_SECRET_KEY')   ?: '');
 define('STRIPE_WEBHOOK_SECRET', getenv('STRIPE_WEBHOOK_SECRET') ?: '');
