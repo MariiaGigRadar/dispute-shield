@@ -6,6 +6,39 @@
 
 require_once __DIR__ . '/../vendor/autoload.php';
 
+/**
+ * Convert UTF-8 string to FPDF-safe Latin-1.
+ * Replaces special chars with ASCII equivalents.
+ */
+function pdfSafe(string $text): string {
+    $map = [
+        // em dash, en dash, horizontal line chars
+        "â" => '-', "â" => '-',
+        "â" => '-', "â" => '=',
+        // arrows
+        "â" => '->', "â" => '<-',
+        "â" => '[YES]', "â" => '[NO]',
+        // stars
+        "â" => '*', "â" => '*',
+        // bullets and special
+        "â¢" => '*', "Â " => ' ',
+        // curly quotes
+        "â" => '"', "â" => '"',
+        "â" => "'", "â" => "'",
+        // ellipsis
+        "â¦" => '...',
+        // checkmarks / crosses
+        "â" => '[OK]',
+        // non-breaking hyphen
+        "â" => '-',
+        // section/paragraph signs
+        "Â§" => 'S', "Â¶" => 'P',
+    ];
+    $text = str_replace(array_keys($map), array_values($map), $text);
+    // Convert remaining UTF-8 to Latin-1, replace unknowns with ?
+    return iconv('UTF-8', 'ISO-8859-1//TRANSLIT//IGNORE', $text) ?: $text;
+}
+
 class DisputePDF extends \FPDF {
 
     function header() {}
@@ -20,7 +53,7 @@ class DisputePDF extends \FPDF {
         $this->SetFont('Helvetica', 'B', 10);
         $this->SetFillColor(30, 30, 50);
         $this->SetTextColor(255, 255, 255);
-        $this->Cell(0, 7, strtoupper($text), 0, 1, 'L', true);
+        $this->Cell(0, 7, pdfSafe(strtoupper($text)), 0, 1, 'L', true);
         $this->SetTextColor(0, 0, 0);
         $this->Ln(2);
     }
@@ -28,16 +61,16 @@ class DisputePDF extends \FPDF {
     function row(string $label, string $value) {
         $this->SetFont('Helvetica', 'B', 9);
         $this->SetTextColor(80, 80, 80);
-        $this->Cell(52, 6, $label . ':', 0, 0);
+        $this->Cell(52, 6, pdfSafe($label) . ':', 0, 0);
         $this->SetFont('Helvetica', '', 9);
         $this->SetTextColor(0, 0, 0);
-        $this->MultiCell(0, 6, $value, 0, 'L');
+        $this->MultiCell(0, 6, pdfSafe($value), 0, 'L');
     }
 
     function bodyText(string $text) {
         $this->SetFont('Helvetica', '', 9);
         $this->SetTextColor(20, 20, 20);
-        $this->MultiCell(0, 5, $text, 0, 'L');
+        $this->MultiCell(0, 5, pdfSafe($text), 0, 'L');
         $this->Ln(2);
     }
 
@@ -45,7 +78,7 @@ class DisputePDF extends \FPDF {
         $this->SetFont('Courier', '', 8);
         $this->SetTextColor(20, 20, 20);
         $this->SetFillColor(245, 245, 250);
-        $this->MultiCell(0, 4.5, $text, 0, 'L', true);
+        $this->MultiCell(0, 4.5, pdfSafe($text), 0, 'L', true);
         $this->Ln(2);
     }
 
@@ -53,7 +86,7 @@ class DisputePDF extends \FPDF {
         $this->SetFont('Helvetica', 'B', 9);
         $this->SetFillColor(220, 240, 220);
         $this->SetTextColor(0, 80, 0);
-        $this->MultiCell(0, 6, $text, 0, 'L', true);
+        $this->MultiCell(0, 6, pdfSafe($text), 0, 'L', true);
         $this->SetTextColor(0, 0, 0);
         $this->Ln(1);
     }
@@ -62,7 +95,7 @@ class DisputePDF extends \FPDF {
         $this->SetFont('Helvetica', 'B', 9);
         $this->SetFillColor(255, 240, 200);
         $this->SetTextColor(120, 60, 0);
-        $this->MultiCell(0, 6, $text, 0, 'L', true);
+        $this->MultiCell(0, 6, pdfSafe($text), 0, 'L', true);
         $this->SetTextColor(0, 0, 0);
         $this->Ln(1);
     }
