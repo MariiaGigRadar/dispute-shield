@@ -177,43 +177,39 @@ $stripeError = null;
 if (STRIPE_SECRET_KEY) {
     try {
         \Stripe\Stripe::setApiKey(STRIPE_SECRET_KEY);
-        // Fetch disputes with charge expanded (customer nested expand)
-        $list = \Stripe\Dispute::all([
-            'limit'  => 100,
-            'expand' => ['data.charge', 'data.payment_intent'],
-        ]);
+        $list = \Stripe\Dispute::all(['limit' => 100]);
         foreach ($list->data as $d) {
             $em    = '';
             $chAmt = $d->amount;
 
-            // charge is already expanded
-            $ch = is_object($d->charge) ? $d->charge : null;
-
-            if ($ch) {
+            try {
+                $ch = \Stripe\Charge::retrieve([
+                    'id'     => $d->charge,
+                    'expand' => ['customer'],
+                ]);
                 // Source 1: billing_details.email
                 $em = $ch->billing_details->email ?? '';
-
-                // Source 2: customer (string ID) - retrieve it
+                // Source 2: expanded customer object
                 if (!$em) {
-                    $custId = is_object($ch->customer) ? ($ch->customer->id ?? null) : ($ch->customer ?? null);
-                    if ($custId) {
+                    $cust = $ch->customer ?? null;
+                    if (is_object($cust) && !empty($cust->email)) {
+                        $em = $cust->email;
+                    } elseif (is_string($cust) && $cust) {
                         try {
-                            $cObj = \Stripe\Customer::retrieve($custId);
+                            $cObj = \Stripe\Customer::retrieve($cust);
                             $em   = $cObj->email ?? '';
                         } catch (\Exception $e2) {}
                     }
                 }
-
                 // Source 3: receipt_email
                 if (!$em && !empty($ch->receipt_email)) {
                     $em = $ch->receipt_email;
                 }
-
                 // Source 4: metadata
                 if (!$em && !empty($ch->metadata['email'])) {
                     $em = $ch->metadata['email'];
                 }
-            }
+            } catch (\Exception $e) {}
 
             $status = $d->status;
             $stats['total']++;
