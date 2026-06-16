@@ -177,30 +177,28 @@ $stripeError = null;
 if (STRIPE_SECRET_KEY) {
     try {
         \Stripe\Stripe::setApiKey(STRIPE_SECRET_KEY);
-        // Fetch disputes with charge+customer expanded in one call
+        // Fetch disputes with charge expanded (customer nested expand)
         $list = \Stripe\Dispute::all([
             'limit'  => 100,
-            'expand' => ['data.charge.customer'],
+            'expand' => ['data.charge', 'data.payment_intent'],
         ]);
         foreach ($list->data as $d) {
             $em    = '';
             $chAmt = $d->amount;
 
-            // $d->charge is already expanded (object), not just an ID
-            $ch = $d->charge;
+            // charge is already expanded
+            $ch = is_object($d->charge) ? $d->charge : null;
 
-            if ($ch && is_object($ch)) {
+            if ($ch) {
                 // Source 1: billing_details.email
                 $em = $ch->billing_details->email ?? '';
 
-                // Source 2: expanded customer.email
+                // Source 2: customer (string ID) - retrieve it
                 if (!$em) {
-                    $cust = $ch->customer ?? null;
-                    if (is_object($cust) && !empty($cust->email)) {
-                        $em = $cust->email;
-                    } elseif (is_string($cust) && $cust) {
+                    $custId = is_object($ch->customer) ? ($ch->customer->id ?? null) : ($ch->customer ?? null);
+                    if ($custId) {
                         try {
-                            $cObj = \Stripe\Customer::retrieve($cust);
+                            $cObj = \Stripe\Customer::retrieve($custId);
                             $em   = $cObj->email ?? '';
                         } catch (\Exception $e2) {}
                     }
