@@ -27,7 +27,7 @@ function getPostHogUser(string $email): array {
             min(if(event='auto_bid_reply_received', timestamp, null))        AS first_reply_date,
             min(if(event='subscription_active', timestamp, null))            AS subscription_start,
             max(if(event='subscription_canceled', timestamp, null))          AS subscription_canceled,
-            countIf(event='auto_bid_reply_received' OR event='reply_received' OR event='bid_reply_received') AS total_replies,
+            countIf(event IN ('auto_bid_reply_received', 'reply_received', 'bid_reply_received')) AS total_replies,
             countIf(event='usage_recorded')                                  AS proposals_sent,
             countIf(event='scanner_created')                                 AS scanners_created,
             countIf(event='auto_bidder_disabled_no_connects')               AS no_connects_events,
@@ -135,6 +135,7 @@ function getPostHogUser(string $email): array {
         'total_paid_usd'         => $revenue,
         'mrr'                    => $mrr,
         'is_canceled'            => !empty($row[5]),
+        'stripe_subscription_status' => '',  // filled by enrichWithStripe
 
         // Geo & device
         'geo_country'            => \$row[22] ?? '',
