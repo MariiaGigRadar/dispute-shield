@@ -152,7 +152,7 @@ if ($action === 'pdf') {
     $rebuttal    = buildRebuttalLetter($u, $email, $reason);
     $activityLog = buildActivityLog($u, $email);
 
-    $path  = generateDisputePDF($email, $reason, $u, $rebuttal, $activityLog, $intercomLog);
+    $path  = generateDisputePDF($email, $reason, $u, $rebuttal, $activityLog, $intercomLog, $intercom);
     $fname = 'GigRadar_Dispute_' . preg_replace('/[^a-z0-9]/i', '_', $email) . '_' . date('Ymd') . '.pdf';
     header('Content-Type: application/pdf');
     header('Content-Disposition: attachment; filename="' . $fname . '"');
