@@ -246,6 +246,36 @@ if (STRIPE_SECRET_KEY) {
             ];
         }
         usort($disputes, fn($a, $b) => strcmp($b['date'], $a['date']));
+
+        // DEBUG: store first few charge email sources for inspection
+        $debugInfo = [];
+        $debugCount = 0;
+        foreach ($chargeEmailMap as $chId => $em) {
+            if ($debugCount++ >= 3) break;
+            $debugInfo[] = $chId . ' => ' . ($em ?: '[EMPTY]');
+        }
+        // Also check what fields the first charge actually has
+        if (!empty($rawList->data)) {
+            $firstChId = $rawList->data[0]->charge;
+            try {
+                $testCh = \Stripe\Charge::retrieve(['id' => $firstChId, 'expand' => ['customer']]);
+                $debugInfo[] = 'billing_email: ' . ($testCh->billing_details->email ?? 'NULL');
+                $debugInfo[] = 'receipt_email: ' . ($testCh->receipt_email ?? 'NULL');
+                $cust = $testCh->customer;
+                $debugInfo[] = 'customer type: ' . gettype($cust);
+                if (is_object($cust)) {
+                    $debugInfo[] = 'customer.email: ' . ($cust->email ?? 'NULL');
+                } elseif (is_string($cust)) {
+                    $debugInfo[] = 'customer is string ID: ' . $cust;
+                    $cObj = \Stripe\Customer::retrieve($cust);
+                    $debugInfo[] = 'retrieved customer.email: ' . ($cObj->email ?? 'NULL');
+                }
+            } catch (\Exception $e3) {
+                $debugInfo[] = 'debug error: ' . $e3->getMessage();
+            }
+        }
+        $GLOBALS['stripeDebug'] = $debugInfo;
+
     } catch (\Exception $e) {
         $stripeError = $e->getMessage();
     }
@@ -341,6 +371,12 @@ tr:hover td{background:#0f1a2e}
     <div class="card-title">🔍 Generate Dispute Evidence</div>
     <?php if ($stripeError): ?>
       <div class="error-box">⚠ Stripe error: <?= htmlspecialchars($stripeError) ?><br><small>Make sure STRIPE_SECRET_KEY is set in Railway Variables.</small></div>
+    <?php endif; ?>
+    <?php if (!empty($GLOBALS['stripeDebug'])): ?>
+      <div class="error-box" style="background:#0a1a0a;border-color:#166534;color:#86efac;font-family:monospace;font-size:11px;line-height:1.8">
+        <b>DEBUG — Stripe email sources (first charge):</b><br>
+        <?php foreach ($GLOBALS['stripeDebug'] as $line): ?><?= htmlspecialchars($line) ?><br><?php endforeach; ?>
+      </div>
     <?php endif; ?>
     <div class="form-row">
       <input class="input" id="emailInput" type="email" placeholder="customer@email.com">
