@@ -174,8 +174,29 @@ if (STRIPE_SECRET_KEY) {
             $em    = '';
             $chAmt = $d->amount;
             try {
-                $ch = \Stripe\Charge::retrieve(['id' => $d->charge, 'expand' => ['customer', 'billing_details']]);
-                $em = $ch->billing_details->email ?? ($ch->customer->email ?? '');
+                $ch = \Stripe\Charge::retrieve([
+                    'id'     => $d->charge,
+                    'expand' => ['customer', 'invoice', 'payment_intent'],
+                ]);
+                // Try multiple sources for email
+                $em = $ch->billing_details->email ?? '';
+                if (!$em && !empty($ch->customer)) {
+                    $em = is_object($ch->customer) ? ($ch->customer->email ?? '') : '';
+                }
+                if (!$em && !empty($ch->receipt_email)) {
+                    $em = $ch->receipt_email;
+                }
+                if (!$em && !empty($ch->metadata['email'])) {
+                    $em = $ch->metadata['email'];
+                }
+                // Last resort: lookup customer directly
+                if (!$em && !empty($ch->customer)) {
+                    $custId = is_object($ch->customer) ? $ch->customer->id : $ch->customer;
+                    if ($custId) {
+                        $cObj = \Stripe\Customer::retrieve($custId);
+                        $em   = $cObj->email ?? '';
+                    }
+                }
             } catch (\Exception $e) {}
 
             $status = $d->status;
