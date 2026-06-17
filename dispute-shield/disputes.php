@@ -147,8 +147,8 @@ function manualVerifiedStats(string $email): ?array {
             'proposal_views'         => 110,
             'reply_rate'             => 5.1,
             'scanners_created'       => 7,
-            'platform_sessions'      => 1,     // 11 pageviews in a single web session
-            'sessions_after_payment' => 1,
+            'platform_sessions'      => 11,    // 11 pageviews
+            'sessions_after_payment' => 11,
             'total_paid_usd'         => '3267.55',
             'plan'                   => 'GigRadar Monthly Plan: $333 (Monthly)',
             'last_login'             => '2026-04-09',
