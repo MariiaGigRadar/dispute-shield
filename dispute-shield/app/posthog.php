@@ -10,8 +10,16 @@ function posthogQuery(string $sql): array {
         'ignore_errors' => true,
     ]]);
     $resp = @file_get_contents($url, false, $ctx);
-    if (!$resp) return [];
+    if ($resp === false) {
+        error_log('[posthog] request failed: ' . $url);
+        return [];
+    }
     $data = json_decode($resp, true);
+    // PostHog returns 4xx with a JSON body containing "type"/"detail" on query errors
+    if (isset($data['type']) && ($data['type'] === 'validation_error' || isset($data['detail']))) {
+        error_log('[posthog] query error: ' . ($data['detail'] ?? $resp));
+        return [];
+    }
     return $data['results'] ?? [];
 }
 
@@ -46,8 +54,7 @@ function getPostHogUser(string $email): array {
             any(person.properties.\$geoip_country_name)                           AS geo_country,
             any(person.properties.\$geoip_city_name)                              AS geo_city,
             any(person.properties.\$initial_referring_domain)                     AS referring_domain,
-            any(person.properties.\$initial_current_url)                          AS signup_url,
-            countIf(event='\$pageview' AND timestamp > subscription_start)        AS sessions_after_payment
+            any(person.properties.\$initial_current_url)                          AS signup_url
         FROM events
         WHERE person.properties.email = '$e'
         LIMIT 1
@@ -91,6 +98,19 @@ function getPostHogUser(string $email): array {
             'admin_actions'          => [],
         ];
     }
+
+    // sessions_after_payment — must be a separate query: can't reference an
+    // aggregate alias (subscription_start) inside another aggregate in HogQL/ClickHouse.
+    $sap = posthogQuery("
+        SELECT countIf(event='\$pageview' AND timestamp > (
+            SELECT min(timestamp) FROM events
+            WHERE person.properties.email = '$e' AND event='subscription_active'
+        )) AS sessions_after_payment
+        FROM events
+        WHERE person.properties.email = '$e'
+        LIMIT 1
+    ");
+    $sessionsAfterPayment = (int)($sap[0][0] ?? 0);
 
     // Recent activity — meaningful events only
     $recent = posthogQuery("
@@ -176,7 +196,7 @@ function getPostHogUser(string $email): array {
         'geo_city'               => $row[23] ?? '',
         'referring_domain'       => $row[24] ?? '',
         'signup_url'             => $row[25] ?? '',
-        'sessions_after_payment' => (int)($row[26] ?? 0),
+        'sessions_after_payment' => $sessionsAfterPayment,
 
         // Activity logs
         'recent_activity'        => array_map(fn($r) => [
