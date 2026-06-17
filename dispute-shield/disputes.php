@@ -270,7 +270,12 @@ if ($action === 'pdf') {
         if (empty($u['plan']) || $u['plan'] === 'Paid Plan') {
             $u['plan'] = $intercom['stripe_plan'] ?? $u['plan'];
         }
-        if (empty($u['geo_country'])) {
+        // Prefer Intercom's real billing location over PostHog IP geo
+        // (IP geolocation often resolves to a datacenter city, e.g. Boardman).
+        if (!empty($intercom['location']['city'])) {
+            $u['geo_country'] = $intercom['location']['country'] ?? $u['geo_country'] ?? '';
+            $u['geo_city']    = $intercom['location']['city'];
+        } elseif (empty($u['geo_country'])) {
             $u['geo_country'] = $intercom['location']['country'] ?? '';
             $u['geo_city']    = $intercom['location']['city'] ?? '';
         }
