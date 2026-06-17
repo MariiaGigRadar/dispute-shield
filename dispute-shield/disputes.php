@@ -160,6 +160,28 @@ function manualVerifiedStats(string $email): ?array {
             'disputed_invoice_unit'   => '2.35',
             'disputed_invoice_desc'   => 'GigRadar Sardor AI Proposal',
             'disputed_invoice_note'   => 'Extra usage beyond plan limit - 273 additional AI proposals (Sardor AI) sent on top of the bids included in the subscription, billed per-proposal as overage.',
+            // Verified Intercom communications (fallback until live Intercom works)
+            'comm' => [
+                'total_conversations'   => 13,
+                'client_initiated'      => 5,
+                'gigradar_initiated'    => 8,
+                'client_messages'       => 9,
+                'gigradar_messages'     => 20,
+                'gigradar_emails_sent'  => 6,
+                'client_email_replies'  => 4,
+                'first_contact'         => '2025-10-22',
+                'last_conversation'     => '2026-05-22',
+                'last_client_reply'     => '2026-04-09',
+                'key_events' => [
+                    '2025-10-22  Welcome / onboarding email sent by GigRadar',
+                    '2026-01-21  Customer emailed "do not renew" (replying to renewal notice)',
+                    '2026-01-21  GigRadar offered discounted monthly plan; customer negotiated price',
+                    '2026-01-21  GigRadar disclosed unpaid extra usage to be settled at renewal',
+                    '2026-01-21  Customer replied "Yes lets do it" - agreed to continue subscription',
+                    '2026-04-09  Customer requested cancellation',
+                    '2026-05-22  Dispute #J96KM0KW-0006 - clarification on $641.55 extra-usage charge',
+                ],
+            ],
         ],
     ];
     return $verified[strtolower(trim($email))] ?? null;
@@ -193,6 +215,9 @@ function applyManualStats(array &$u, array $v): void {
     }
     $u['stats_source'] = 'verified';
     $u['stats_window'] = ['from' => $v['window_from'], 'to' => $v['window_to']];
+    if (!empty($v['comm'])) {
+        $u['verified_comm'] = $v['comm'];
+    }
 }
 
 // ── Helper: real proposal stats from Mongo (matches product dashboard) ──────
@@ -296,6 +321,11 @@ if ($action === 'pdf') {
     // Real Sent/Reply/View from Mongo (dashboard-accurate) — overrides PostHog.
     enrichWithMongo($u, $intercom, $email);
 
+    // Section 5: if live Intercom returned nothing but we have verified comm data, use it.
+    if (empty($intercom['found']) && !empty($u['verified_comm'])) {
+        $intercomLog = buildVerifiedCommBrief($u['verified_comm'], $email);
+    }
+
     $rebuttal    = buildRebuttalLetter($u, $email, $reason);
     $activityLog = buildActivityLog($u, $email, $intercom);
 
@@ -348,6 +378,11 @@ if ($action === 'preview') {
 
         // Real Sent/Reply/View from Mongo (dashboard-accurate) — overrides PostHog.
         enrichWithMongo($u, $intercom, $email);
+
+        // Section 5: verified comm fallback if live Intercom empty
+        if (empty($intercom['found']) && !empty($u['verified_comm'])) {
+            $intercomLog = buildVerifiedCommBrief($u['verified_comm'], $email);
+        }
 
         $payload = [
             'user'         => $u,
