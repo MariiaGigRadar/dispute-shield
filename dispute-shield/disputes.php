@@ -134,40 +134,98 @@ function enrichWithStripe(array &$u, string $email): void {
     } catch (\Exception $e) {}
 }
 
+// ── Manual verified stats (fallback until Mongo access is live) ─────────────
+// These are real numbers pulled directly from GigRadar production (Mongo) for
+// specific clients, used ONLY when the live Mongo query can't run (no access
+// yet / IP not whitelisted). When Mongo is reachable it ALWAYS takes priority
+// and these are ignored. Keyed by lowercase email.
+function manualVerifiedStats(string $email): ?array {
+    $verified = [
+        'luke@arbollc.com' => [
+            'proposals_sent'         => 1424,
+            'total_replies'          => 73,
+            'proposal_views'         => 110,
+            'reply_rate'             => 5.1,
+            'scanners_created'       => 7,
+            'platform_sessions'      => 1,     // 11 pageviews in a single web session
+            'sessions_after_payment' => 1,
+            'total_paid_usd'         => '3267.55',
+            'plan'                   => 'GigRadar Monthly Plan: $333 (Monthly)',
+            'last_login'             => '2026-04-09',
+            'window_from'            => '2025-10-22',
+            'window_to'              => '2026-04-23',
+            // Disputed Stripe invoice (the specific charge being contested)
+            'disputed_invoice_amount' => '641.55',
+            'disputed_invoice_qty'    => 273,
+            'disputed_invoice_unit'   => '2.35',
+            'disputed_invoice_desc'   => 'GigRadar Sardor AI Proposal',
+            'disputed_invoice_note'   => 'Extra usage beyond plan limit - 273 additional AI proposals (Sardor AI) sent on top of the bids included in the subscription, billed per-proposal as overage.',
+        ],
+    ];
+    return $verified[strtolower(trim($email))] ?? null;
+}
+
+// Apply verified stats onto the user array (fallback path).
+function applyManualStats(array &$u, array $v): void {
+    $u['proposals_sent']        = $v['proposals_sent'];
+    $u['total_replies']         = $v['total_replies'];
+    $u['proposal_views']        = $v['proposal_views'];
+    $u['reply_rate']            = $v['reply_rate'];
+    $u['scanners_created']      = $v['scanners_created'];
+    $u['total_pageviews']       = $v['platform_sessions'];     // shown as "Platform sessions"
+    $u['sessions_after_payment']= $v['sessions_after_payment'];
+    if (!empty($v['total_paid_usd'])) {
+        $u['total_paid_usd'] = $v['total_paid_usd'];
+    }
+    if (!empty($v['plan'])) {
+        $u['plan'] = $v['plan'];
+    }
+    if (!empty($v['last_login'])) {
+        $u['last_pageview'] = $v['last_login'];
+    }
+    // Disputed invoice breakdown (specific contested charge)
+    if (!empty($v['disputed_invoice_amount'])) {
+        $u['disputed_invoice_amount'] = $v['disputed_invoice_amount'];
+        $u['disputed_invoice_qty']    = $v['disputed_invoice_qty'] ?? null;
+        $u['disputed_invoice_unit']   = $v['disputed_invoice_unit'] ?? null;
+        $u['disputed_invoice_desc']   = $v['disputed_invoice_desc'] ?? '';
+        $u['disputed_invoice_note']   = $v['disputed_invoice_note'] ?? '';
+    }
+    $u['stats_source'] = 'verified';
+    $u['stats_window'] = ['from' => $v['window_from'], 'to' => $v['window_to']];
+}
+
 // ── Helper: real proposal stats from Mongo (matches product dashboard) ──────
 // PostHog under-reports proposals/replies. The canonical numbers live in the
 // `proposals` collection. We pull them per-team over the subscription period
 // and overwrite the PostHog-derived counts when Mongo is reachable.
-function enrichWithMongo(array &$u, array $intercom): void {
+function enrichWithMongo(array &$u, array $intercom, string $email = ''): void {
     $teamOid = $intercom['team_oid'] ?? '';
-    if (!$teamOid) return;
 
-    // Determine the window. Prefer the paid subscription period; fall back to
-    // "all time" (null bounds) so the lifetime total is shown if no period set.
-    [$fromTs, $toTs] = subscriptionWindow($u, $intercom);
-
-    $stats = getMongoProposalStats($teamOid, $fromTs, $toTs);
-    if (empty($stats['found'])) {
+    // Try live Mongo first (authoritative).
+    if ($teamOid) {
+        [$fromTs, $toTs] = subscriptionWindow($u, $intercom);
+        $stats = getMongoProposalStats($teamOid, $fromTs, $toTs);
+        if (!empty($stats['found'])) {
+            $u['proposals_sent']  = $stats['sent'];
+            $u['total_replies']   = $stats['replies'];
+            $u['proposal_views']  = $stats['views'];
+            $u['reply_rate']      = $stats['reply_rate'];
+            $u['stats_source']    = 'mongo';
+            $u['stats_window']    = [
+                'from' => $fromTs ? date('Y-m-d', $fromTs) : 'all-time',
+                'to'   => $toTs   ? date('Y-m-d', $toTs)   : 'now',
+            ];
+            $scanners = getMongoScannerCount($teamOid, $fromTs, $toTs);
+            if ($scanners !== null) $u['scanners_created'] = $scanners;
+            return; // live data wins — done
+        }
         if (!empty($stats['error'])) error_log('[mongo] ' . $stats['error']);
-        return;
     }
 
-    // Overwrite with real, dashboard-accurate numbers.
-    $u['proposals_sent']  = $stats['sent'];
-    $u['total_replies']   = $stats['replies'];
-    $u['proposal_views']  = $stats['views'];
-    $u['reply_rate']      = $stats['reply_rate'];
-    $u['stats_source']    = 'mongo';
-    $u['stats_window']    = [
-        'from' => $fromTs ? date('Y-m-d', $fromTs) : 'all-time',
-        'to'   => $toTs   ? date('Y-m-d', $toTs)   : 'now',
-    ];
-
-    // Scanners: distinct scannerID in proposals over the same window.
-    $scanners = getMongoScannerCount($teamOid, $fromTs, $toTs);
-    if ($scanners !== null) {
-        $u['scanners_created'] = $scanners;
-    }
+    // Mongo unavailable → use manual verified stats if we have them for this client.
+    $v = manualVerifiedStats($email);
+    if ($v) applyManualStats($u, $v);
 }
 
 // Compute [fromTs, toTs] covering the FULL subscription period — from the
@@ -199,7 +257,7 @@ if ($action === 'pdf') {
     enrichWithStripe($u, $email);
 
     $intercom    = getIntercomData($email);
-    $intercomLog = $intercom['summary'] ?? '';
+    $intercomLog = buildIntercomBrief($intercom, $email);
 
     // Fill missing fields from Intercom when PostHog has no data
     if (!empty($intercom['found'])) {
@@ -231,10 +289,10 @@ if ($action === 'pdf') {
     }
 
     // Real Sent/Reply/View from Mongo (dashboard-accurate) — overrides PostHog.
-    enrichWithMongo($u, $intercom);
+    enrichWithMongo($u, $intercom, $email);
 
     $rebuttal    = buildRebuttalLetter($u, $email, $reason);
-    $activityLog = buildActivityLog($u, $email);
+    $activityLog = buildActivityLog($u, $email, $intercom);
 
     $path  = generateDisputePDF($email, $reason, $u, $rebuttal, $activityLog, $intercomLog, $intercom);
     $fname = 'GigRadar_Dispute_' . preg_replace('/[^a-z0-9]/i', '_', $email) . '_' . date('Ymd') . '.pdf';
@@ -272,7 +330,7 @@ if ($action === 'preview') {
         enrichWithStripe($u, $email);
 
         $intercom    = getIntercomData($email);
-        $intercomLog = $intercom['summary'] ?? '';
+        $intercomLog = buildIntercomBrief($intercom, $email);
 
         // Fill missing fields from Intercom
         if (!empty($intercom['found'])) {
@@ -284,13 +342,13 @@ if ($action === 'preview') {
         }
 
         // Real Sent/Reply/View from Mongo (dashboard-accurate) — overrides PostHog.
-        enrichWithMongo($u, $intercom);
+        enrichWithMongo($u, $intercom, $email);
 
         $payload = [
             'user'         => $u,
             'intercom'     => $intercom,
             'stripe_text'  => buildRebuttalLetter($u, $email, $_POST['reason'] ?? 'fraudulent'),
-            'internal_log' => buildActivityLog($u, $email),
+            'internal_log' => buildActivityLog($u, $email, $intercom),
             'intercom_log' => $intercomLog,
         ];
         ob_clean(); // drop any stray output before the JSON
