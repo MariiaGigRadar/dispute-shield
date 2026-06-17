@@ -236,6 +236,68 @@ function getIntercomData(string $email): array {
 }
 
 /**
+ * Concise communications summary for the dispute PDF (section 5).
+ * Shows how many times each side wrote, and first/last contact dates (UTC).
+ */
+function buildIntercomBrief(array $intercom, string $email): string {
+    if (empty($intercom['found'])) {
+        return "No Intercom communication records found for $email.\n"
+             . "The customer never contacted GigRadar support before filing this chargeback.";
+    }
+
+    $convs = $intercom['conversations'] ?? [];
+    $dates = array_filter(array_map(fn($c) => $c['date'] ?? '', $convs));
+    sort($dates);
+    $first = $dates[0] ?? '';
+    $last  = end($dates) ?: '';
+
+    $clientInit = count(array_filter($convs, fn($c) => ($c['opened_by'] ?? '') === 'CLIENT'));
+    $grInit     = count(array_filter($convs, fn($c) => ($c['opened_by'] ?? '') === 'GIGRADAR'));
+
+    $l = [];
+    $l[] = "CUSTOMER COMMUNICATION SUMMARY";
+    $l[] = "Source: Intercom CRM  |  All dates/times in UTC";
+    $l[] = "Customer: $email";
+    $l[] = str_repeat("-", 56);
+    $l[] = "";
+    $l[] = "CONTACT VOLUME:";
+    $l[] = "  Total conversations:          " . count($convs);
+    $l[] = "  Started by customer:          $clientInit";
+    $l[] = "  Started by GigRadar:          $grInit";
+    $l[] = "  Messages from customer:       " . (int)($intercom['total_client_messages'] ?? 0);
+    $l[] = "  Messages from GigRadar:       " . (int)($intercom['total_gigradar_messages'] ?? 0);
+    $l[] = "  Emails GigRadar sent:         " . (int)($intercom['gigradar_emails_sent'] ?? 0);
+    $l[] = "  Email replies from customer:  " . (int)($intercom['client_email_replies'] ?? 0);
+    $l[] = "";
+    $l[] = "TIMELINE (UTC):";
+    if ($first) $l[] = "  First contact:               $first";
+    if ($last)  $l[] = "  Last conversation:           $last";
+    if (!empty($intercom['last_contacted']))    $l[] = "  Last contacted by GigRadar:  " . $intercom['last_contacted'];
+    if (!empty($intercom['last_replied']))      $l[] = "  Last reply from customer:    " . $intercom['last_replied'];
+    if (!empty($intercom['last_email_opened'])) $l[] = "  Last email opened by client: " . $intercom['last_email_opened'];
+    $l[] = "";
+
+    if (!empty($intercom['rating_scores'])) {
+        $avg = array_sum($intercom['rating_scores']) / count($intercom['rating_scores']);
+        $l[] = "SATISFACTION:";
+        $l[] = "  Support ratings given:        " . count($intercom['rating_scores'])
+             . "  (avg " . number_format($avg, 1) . "/5)";
+        $l[] = "";
+    }
+
+    $l[] = "KEY FINDING:";
+    if ((int)($intercom['total_client_messages'] ?? 0) > 0) {
+        $l[] = "  The customer actively communicated with GigRadar support,";
+        $l[] = "  confirming they used the platform and had our contact details.";
+    } else {
+        $l[] = "  The customer never initiated contact with support before the";
+        $l[] = "  chargeback - a strong indicator of friendly fraud.";
+    }
+
+    return implode("\n", $l);
+}
+
+/**
  * Строим текстовый лог для Stripe evidence  -  читает банковский клерк
  */
 function buildIntercomSummary(
