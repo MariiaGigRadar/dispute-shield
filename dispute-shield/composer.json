@@ -1,6 +1,7 @@
 {
     "require": {
         "stripe/stripe-php": "^10.0",
-        "setasign/fpdf": "^1.8"
+        "setasign/fpdf": "^1.8",
+        "ext-mongodb": "*"
     }
 }
