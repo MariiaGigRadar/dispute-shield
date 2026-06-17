@@ -89,7 +89,7 @@ function buildEvidence(array $u, string $email, string $reason = 'fraudulent'): 
  * Activity log  -  chronological, specific, timestamped.
  * Goes into Stripe's access_activity_log field.
  */
-function buildActivityLog(array $u, string $email): string {
+function buildActivityLog(array $u, string $email, array $intercom = []): string {
     $lines = [];
     $lines[] = "ACCOUNT ACTIVITY LOG";
     $lines[] = "Customer: $email";
@@ -181,13 +181,47 @@ function buildActivityLog(array $u, string $email): string {
         $lines[] = "  -> These transactions qualify for Visa CE 3.0 submission (doubles win rate)";
     }
 
+    // ── Intercom communication activity (detailed, timestamped) ──────────────
+    if (!empty($intercom['found'])) {
+        $lines[] = "";
+        $lines[] = str_repeat("-", 56);
+        $lines[] = "CUSTOMER COMMUNICATION ACTIVITY (Intercom CRM, UTC):";
+        $lines[] = "";
+        if (!empty($intercom['last_seen_at']))
+            $lines[] = "  Last seen in product:        " . $intercom['last_seen_at'];
+        if (!empty($intercom['last_contacted']))
+            $lines[] = "  Last contacted by GigRadar:  " . $intercom['last_contacted'];
+        if (!empty($intercom['last_replied']))
+            $lines[] = "  Last reply from customer:    " . $intercom['last_replied'];
+        if (!empty($intercom['last_email_opened']))
+            $lines[] = "  Last email opened:           " . $intercom['last_email_opened'];
+        $lines[] = "";
+        $lines[] = "  Total conversations:         " . (int)($intercom['total_conversations'] ?? 0);
+        $lines[] = "  Messages from GigRadar:      " . (int)($intercom['total_gigradar_messages'] ?? 0);
+        $lines[] = "  Messages from customer:      " . (int)($intercom['total_client_messages'] ?? 0);
+        $lines[] = "  Emails GigRadar sent:        " . (int)($intercom['gigradar_emails_sent'] ?? 0);
+        $lines[] = "  Email replies from customer: " . (int)($intercom['client_email_replies'] ?? 0);
+
+        // Per-conversation timeline (date/time of each)
+        if (!empty($intercom['conversations'])) {
+            $lines[] = "";
+            $lines[] = "  CONVERSATION TIMELINE:";
+            foreach ($intercom['conversations'] as $i => $c) {
+                $n = $i + 1;
+                $when = $c['date'] ?? '';
+                $by   = $c['opened_by'] ?? '';
+                $subj = $c['subject'] ?? '';
+                $line = "    #$n  $when  opened by $by";
+                if ($subj) $line .= "  \"" . mb_substr($subj, 0, 60) . "\"";
+                $lines[] = $line;
+                if (!empty($c['first_reply_at']))
+                    $lines[] = "         GigRadar first replied: " . $c['first_reply_at'];
+            }
+        }
+    }
+
     return implode("\n", $lines);
 }
-
-/**
- * Main rebuttal letter  -  the most important field.
- * Structured for bank reviewers who spend 2-3 minutes per case.
- */
 function buildRebuttalLetter(array $u, string $email, string $reason): string {
     // Proceed even if PostHog data not found — Stripe data still available
     $name      = ($u['name'] ?? '') ?: $email;
@@ -226,6 +260,18 @@ function buildRebuttalLetter(array $u, string $email, string $reason): string {
     $out[] = "Subscription plan:    $plan";
     $out[] = "Subscription start:   $signup";
     $out[] = "Total billed to date: \$$totalPaid USD";
+    if (!empty($u['disputed_invoice_amount'])) {
+        $di = "Disputed invoice:     \$" . $u['disputed_invoice_amount'] . " USD";
+        if (!empty($u['disputed_invoice_qty']) && !empty($u['disputed_invoice_unit'])) {
+            $di .= " (" . $u['disputed_invoice_qty'] . " "
+                 . ($u['disputed_invoice_desc'] ?: 'proposals')
+                 . " x \$" . $u['disputed_invoice_unit'] . ")";
+        }
+        $out[] = $di;
+        if (!empty($u['disputed_invoice_note'])) {
+            $out[] = "  -> " . $u['disputed_invoice_note'];
+        }
+    }
 
     // Subscription status: prefer Stripe data
     $stripeStatus = strtolower($u['stripe_subscription_status'] ?? '');
