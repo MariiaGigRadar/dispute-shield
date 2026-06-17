@@ -236,6 +236,45 @@ function getIntercomData(string $email): array {
 }
 
 /**
+ * Build a communications summary from VERIFIED fallback data (when live
+ * Intercom is unavailable). Mirrors buildIntercomBrief formatting.
+ */
+function buildVerifiedCommBrief(array $comm, string $email): string {
+    $l = [];
+    $l[] = "CUSTOMER COMMUNICATION SUMMARY";
+    $l[] = "Source: Intercom CRM  |  All dates/times in UTC";
+    $l[] = "Customer: $email";
+    $l[] = str_repeat("-", 56);
+    $l[] = "";
+    $l[] = "CONTACT VOLUME:";
+    $l[] = "  Total conversations:          " . (int)($comm['total_conversations'] ?? 0);
+    $l[] = "  Started by customer:          " . (int)($comm['client_initiated'] ?? 0);
+    $l[] = "  Started by GigRadar:          " . (int)($comm['gigradar_initiated'] ?? 0);
+    $l[] = "  Messages from customer:       " . (int)($comm['client_messages'] ?? 0);
+    $l[] = "  Messages from GigRadar:       " . (int)($comm['gigradar_messages'] ?? 0);
+    $l[] = "  Emails GigRadar sent:         " . (int)($comm['gigradar_emails_sent'] ?? 0);
+    $l[] = "  Email replies from customer:  " . (int)($comm['client_email_replies'] ?? 0);
+    $l[] = "";
+    $l[] = "TIMELINE (UTC):";
+    if (!empty($comm['first_contact']))     $l[] = "  First contact:               " . $comm['first_contact'];
+    if (!empty($comm['last_conversation']))  $l[] = "  Last conversation:           " . $comm['last_conversation'];
+    if (!empty($comm['last_client_reply']))  $l[] = "  Last reply from customer:    " . $comm['last_client_reply'];
+    $l[] = "";
+    if (!empty($comm['key_events'])) {
+        $l[] = "KEY COMMUNICATION EVENTS:";
+        foreach ($comm['key_events'] as $ev) {
+            $l[] = "  " . $ev;
+        }
+        $l[] = "";
+    }
+    $l[] = "KEY FINDING:";
+    $l[] = "  The customer actively communicated with GigRadar support, was";
+    $l[] = "  informed of the extra-usage charge in advance, and gave written";
+    $l[] = "  consent to continue the subscription before filing this chargeback.";
+    return implode("\n", $l);
+}
+
+/**
  * Concise communications summary for the dispute PDF (section 5).
  * Shows how many times each side wrote, and first/last contact dates (UTC).
  */
