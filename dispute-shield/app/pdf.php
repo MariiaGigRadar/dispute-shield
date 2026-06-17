@@ -188,6 +188,19 @@ function generateDisputePDF(
     $pdf->row('Subscription plan',   $plan);
     $pdf->row('Subscription start',  $subStart);
     $pdf->row('Total billed',        '$' . $amount . ' USD');
+    // Disputed invoice — the specific contested charge, with usage breakdown
+    if (!empty($user['disputed_invoice_amount'])) {
+        $di = '$' . $user['disputed_invoice_amount'] . ' USD';
+        if (!empty($user['disputed_invoice_qty']) && !empty($user['disputed_invoice_unit'])) {
+            $di .= '  (' . $user['disputed_invoice_qty'] . ' '
+                 . ($user['disputed_invoice_desc'] ?: 'proposals')
+                 . ' x $' . $user['disputed_invoice_unit'] . ')';
+        }
+        $pdf->row('Disputed invoice', $di);
+        if (!empty($user['disputed_invoice_note'])) {
+            $pdf->highlight('  ' . $user['disputed_invoice_note']);
+        }
+    }
     $pdf->row('Subscription status', $subStatus);
     $pdf->row('Last platform login', $lastLogin);
     $pdf->row('Dispute reason',      strtoupper(str_replace('_', ' ', $reason)));
