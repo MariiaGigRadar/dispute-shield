@@ -3,7 +3,8 @@ require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/app/posthog.php';
 require_once __DIR__ . '/app/evidence.php';
 require_once __DIR__ . '/app/intercom.php';
-define('POSTHOG_PHP_VERSION', '2026-06-17-v2');
+require_once __DIR__ . '/app/mongo.php';
+define('POSTHOG_PHP_VERSION', '2026-06-17-v4-mongo');
 
 session_start();
 
@@ -63,8 +64,15 @@ function enrichWithStripe(array &$u, string $email): void {
                 $u['plan'] = $prod->name . ($interval ? ' (' . ucfirst($interval) . 'ly)' : '');
             } catch (\Exception $e) {}
             if ($sub->start_date) {
-                $u['signup_date']        = date('Y-m-d', $sub->start_date);
-                $u['subscription_start'] = date('Y-m-d', $sub->start_date);
+                $u['signup_date']          = date('Y-m-d', $sub->start_date);
+                $u['subscription_start']   = date('Y-m-d', $sub->start_date);
+                $u['subscription_start_ts'] = $sub->start_date; // raw unix for window math
+            }
+            // Capture end/cancel for the full-subscription window upper bound
+            $endTs = $sub->ended_at ?? $sub->canceled_at ?? null;
+            if ($endTs) {
+                $u['subscription_end_ts'] = $endTs;
+                $u['subscription_canceled'] = date('Y-m-d', $endTs);
             }
         }
 
@@ -99,12 +107,85 @@ function enrichWithStripe(array &$u, string $email): void {
         $u['total_paid_usd'] = $total > 0 ? number_format($total / 100, 2) : '0.00';
         if (count($prior) > 1) $u['prior_transactions'] = array_slice($prior, 1, 5);
 
+        // Fallback: if charges returned nothing (restricted key without charge:read),
+        // sum paid invoices instead so Total billed isn't shown as $0.
+        if ($total === 0) {
+            try {
+                $invTotal = 0;
+                $invoices = \Stripe\Invoice::all(['customer' => $cust->id, 'limit' => 100]);
+                foreach ($invoices->data as $inv) {
+                    // amount_paid covers succeeded payments incl. the disputed one
+                    $invTotal += (int)($inv->amount_paid ?? 0);
+                }
+                if ($invTotal > 0) {
+                    $u['total_paid_usd'] = number_format($invTotal / 100, 2);
+                    $u['total_billed_source'] = 'invoices';
+                }
+            } catch (\Exception $e2) {
+                error_log('[stripe] invoice fallback failed: ' . $e2->getMessage());
+            }
+        }
+
         $ic = getIntercomData($email);
         if (empty($u['geo_country']) && !empty($ic['location']['country'])) {
             $u['geo_country'] = $ic['location']['country'];
             $u['geo_city']    = $ic['location']['city'] ?? '';
         }
     } catch (\Exception $e) {}
+}
+
+// ── Helper: real proposal stats from Mongo (matches product dashboard) ──────
+// PostHog under-reports proposals/replies. The canonical numbers live in the
+// `proposals` collection. We pull them per-team over the subscription period
+// and overwrite the PostHog-derived counts when Mongo is reachable.
+function enrichWithMongo(array &$u, array $intercom): void {
+    $teamOid = $intercom['team_oid'] ?? '';
+    if (!$teamOid) return;
+
+    // Determine the window. Prefer the paid subscription period; fall back to
+    // "all time" (null bounds) so the lifetime total is shown if no period set.
+    [$fromTs, $toTs] = subscriptionWindow($u, $intercom);
+
+    $stats = getMongoProposalStats($teamOid, $fromTs, $toTs);
+    if (empty($stats['found'])) {
+        if (!empty($stats['error'])) error_log('[mongo] ' . $stats['error']);
+        return;
+    }
+
+    // Overwrite with real, dashboard-accurate numbers.
+    $u['proposals_sent']  = $stats['sent'];
+    $u['total_replies']   = $stats['replies'];
+    $u['proposal_views']  = $stats['views'];
+    $u['reply_rate']      = $stats['reply_rate'];
+    $u['stats_source']    = 'mongo';
+    $u['stats_window']    = [
+        'from' => $fromTs ? date('Y-m-d', $fromTs) : 'all-time',
+        'to'   => $toTs   ? date('Y-m-d', $toTs)   : 'now',
+    ];
+
+    // Scanners: distinct scannerID in proposals over the same window.
+    $scanners = getMongoScannerCount($teamOid, $fromTs, $toTs);
+    if ($scanners !== null) {
+        $u['scanners_created'] = $scanners;
+    }
+}
+
+// Compute [fromTs, toTs] covering the FULL subscription period — from the
+// subscription start through to now. For dispute evidence we want the customer's
+// entire usage history; using now() as the upper bound guarantees we capture
+// every proposal (including any sent after a cancellation, during the
+// already-paid-through period) — no bid is ever excluded by an early cutoff.
+function subscriptionWindow(array $u, array $intercom): array {
+    // Start: prefer Stripe subscription start, then Intercom period start.
+    $startTs = $u['subscription_start_ts']
+        ?? $intercom['stripe_period_start_ts']
+        ?? null;
+
+    if (!$startTs) return [null, null]; // no start info → lifetime (all proposals)
+
+    // Upper bound = now: counts everything from start onward. (Cowork verified
+    // lifetime == window for canceled subs, so this never over-counts.)
+    return [(int)$startTs, time()];
 }
 
 // ── PDF download ──────────────────────────────────────────────────────────
@@ -149,6 +230,9 @@ if ($action === 'pdf') {
         }
     }
 
+    // Real Sent/Reply/View from Mongo (dashboard-accurate) — overrides PostHog.
+    enrichWithMongo($u, $intercom);
+
     $rebuttal    = buildRebuttalLetter($u, $email, $reason);
     $activityLog = buildActivityLog($u, $email);
 
@@ -164,32 +248,57 @@ if ($action === 'pdf') {
 
 // ── Preview (AJAX) ────────────────────────────────────────────────────────
 if ($action === 'preview') {
+    // Never let PHP notices/warnings leak into the JSON body (causes
+    // "Unexpected token '<'" on the frontend). Buffer + JSON-only output.
+    ini_set('display_errors', '0');
+    ob_start();
     header('Content-Type: application/json');
-    $email = trim($_POST['email'] ?? '');
-    if (!$email) { echo json_encode(['error' => 'No email']); exit; }
 
-    $u = getPostHogUser($email);
-    enrichWithStripe($u, $email);
+    // Convert fatal errors into a clean JSON error response
+    register_shutdown_function(function () {
+        $err = error_get_last();
+        if ($err && in_array($err['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+            if (ob_get_length() !== false) ob_clean();
+            if (!headers_sent()) header('Content-Type: application/json');
+            echo json_encode(['error' => 'Server error: ' . $err['message']]);
+        }
+    });
 
-    $intercom    = getIntercomData($email);
-    $intercomLog = $intercom['summary'] ?? '';
+    try {
+        $email = trim($_POST['email'] ?? '');
+        if (!$email) { ob_clean(); echo json_encode(['error' => 'No email']); exit; }
 
-    // Fill missing fields from Intercom
-    if (!empty($intercom['found'])) {
-        if (empty($u['last_active']) || $u['last_active'] === 'unknown') $u['last_active'] = $intercom['last_seen_at'] ?? 'unknown';
-        if (empty($u['plan']) || $u['plan'] === 'Paid Plan') $u['plan'] = $intercom['stripe_plan'] ?? $u['plan'];
-        if (empty($u['geo_country'])) { $u['geo_country'] = $intercom['location']['country'] ?? ''; $u['geo_city'] = $intercom['location']['city'] ?? ''; }
-        if (empty($u['stripe_subscription_status'])) $u['stripe_subscription_status'] = $intercom['stripe_status'] ?? '';
-        if (!($u['found'] ?? false)) { $u['found'] = true; $u['name'] = $u['name'] ?: $email; $u['email'] = $email; }
+        $u = getPostHogUser($email);
+        enrichWithStripe($u, $email);
+
+        $intercom    = getIntercomData($email);
+        $intercomLog = $intercom['summary'] ?? '';
+
+        // Fill missing fields from Intercom
+        if (!empty($intercom['found'])) {
+            if (empty($u['last_active']) || $u['last_active'] === 'unknown') $u['last_active'] = $intercom['last_seen_at'] ?? 'unknown';
+            if (empty($u['plan']) || $u['plan'] === 'Paid Plan') $u['plan'] = $intercom['stripe_plan'] ?? $u['plan'];
+            if (empty($u['geo_country'])) { $u['geo_country'] = $intercom['location']['country'] ?? ''; $u['geo_city'] = $intercom['location']['city'] ?? ''; }
+            if (empty($u['stripe_subscription_status'])) $u['stripe_subscription_status'] = $intercom['stripe_status'] ?? '';
+            if (!($u['found'] ?? false)) { $u['found'] = true; $u['name'] = $u['name'] ?: $email; $u['email'] = $email; }
+        }
+
+        // Real Sent/Reply/View from Mongo (dashboard-accurate) — overrides PostHog.
+        enrichWithMongo($u, $intercom);
+
+        $payload = [
+            'user'         => $u,
+            'intercom'     => $intercom,
+            'stripe_text'  => buildRebuttalLetter($u, $email, $_POST['reason'] ?? 'fraudulent'),
+            'internal_log' => buildActivityLog($u, $email),
+            'intercom_log' => $intercomLog,
+        ];
+        ob_clean(); // drop any stray output before the JSON
+        echo json_encode($payload);
+    } catch (\Throwable $e) {
+        ob_clean();
+        echo json_encode(['error' => 'Server error: ' . $e->getMessage()]);
     }
-
-    echo json_encode([
-        'user'         => $u,
-        'intercom'     => $intercom,
-        'stripe_text'  => buildRebuttalLetter($u, $email, $_POST['reason'] ?? 'fraudulent'),
-        'internal_log' => buildActivityLog($u, $email),
-        'intercom_log' => $intercomLog,
-    ]);
     exit;
 }
 
