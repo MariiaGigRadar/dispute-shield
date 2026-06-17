@@ -174,7 +174,13 @@ function generateDisputePDF(
     } else {
         $subStatus = 'ACTIVE';
     }
-    $lastActive = $user['last_active'] ?? $user['last_pageview'] ?? 'unknown';
+    // "Last platform login" = real web session ($pageview), not server-side
+    // subscription events. last_active can be a subscription_active event date
+    // (e.g. 2026-04-23) which isn't a human login; prefer last_pageview (04-09).
+    $lastLogin = $user['last_pageview'] ?? $user['last_active'] ?? 'unknown';
+    if (empty($lastLogin) || $lastLogin === 'unknown') {
+        $lastLogin = $user['last_active'] ?? 'unknown';
+    }
 
     $pdf->row('Merchant',            'GigRadar (gigradar.io) | support@gigradar.io');
     $pdf->row('Customer name',       $name);
@@ -183,7 +189,7 @@ function generateDisputePDF(
     $pdf->row('Subscription start',  $subStart);
     $pdf->row('Total billed',        '$' . $amount . ' USD');
     $pdf->row('Subscription status', $subStatus);
-    $pdf->row('Last platform login', $lastActive);
+    $pdf->row('Last platform login', $lastLogin);
     $pdf->row('Dispute reason',      strtoupper(str_replace('_', ' ', $reason)));
 
     if (!empty($user['billing_address'])) {
@@ -211,11 +217,22 @@ function generateDisputePDF(
 
     $proposals = (int)($user['proposals_sent']     ?? 0);
     $replies   = (int)($user['total_replies']       ?? 0);
+    $views     = (int)($user['proposal_views']      ?? 0);
     $pageviews = (int)($user['total_pageviews']     ?? 0);
     $scanners  = (int)($user['scanners_created']    ?? 0);
     $lessons   = (int)($user['lessons_completed']   ?? 0);
     $noConn    = (int)($user['no_connects_events']  ?? 0);
     $sessAfter = (int)($user['sessions_after_payment'] ?? 0);
+    $replyRate = $user['reply_rate'] ?? null;
+    $statsSrc  = $user['stats_source'] ?? 'posthog';
+    $window    = $user['stats_window'] ?? null;
+
+    // State the measurement window so the bank sees these cover the disputed period
+    if ($statsSrc === 'mongo' && $window) {
+        $pdf->bodyText('Service-delivery metrics below cover the customer\'s entire '
+            . 'subscription period (' . $window['from'] . ' to ' . $window['to'] . '), '
+            . 'sourced directly from GigRadar production records.');
+    }
 
     if ($proposals > 0) {
         $pdf->highlight("  PROPOSALS SENT: $proposals — using customer's own Upwork connects (KEY EVIDENCE)");
@@ -223,10 +240,17 @@ function generateDisputePDF(
     if ($replies > 0) {
         $pdf->highlight("  UPWORK CLIENT REPLIES: $replies — real responses from independent 3rd-party employers");
     }
+    if ($views > 0) {
+        $pdf->highlight("  PROPOSALS VIEWED BY CLIENTS: $views — independent Upwork employers opened the customer's bids");
+    }
 
     $pdf->row('Job scanners created',    (string)$scanners);
     $pdf->row('Proposals sent',          (string)$proposals);
+    $pdf->row('Proposals viewed',        (string)$views);
     $pdf->row('Upwork replies received', (string)$replies);
+    if ($replyRate !== null) {
+        $pdf->row('Reply rate',          $replyRate . '%');
+    }
     $pdf->row('Platform sessions',       (string)$pageviews);
     $pdf->row('Sessions after payment',  (string)$sessAfter);
     $pdf->row('Academy lessons',         (string)$lessons);
@@ -280,7 +304,7 @@ function generateDisputePDF(
         "The evidence in this packet demonstrates:\n" .
         "  1. Customer (" . $name . ") knowingly purchased a GigRadar subscription.\n" .
         "  2. The service was fully delivered — " . $proposals . " proposals sent, " . $replies . " replies received.\n" .
-        "  3. Customer actively used the platform through " . $lastActive . ".\n" .
+        "  3. Customer actively used the platform through " . $lastLogin . ".\n" .
         "  4. No refund request was submitted before this chargeback.\n" .
         "  5. GigRadar support was responsive and available at all times.\n\n" .
         "We respectfully request the dispute be decided in GigRadar's favor.\n\n" .
