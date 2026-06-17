@@ -540,7 +540,6 @@ tr:hover td{background:#0f1a2e}
   <?php if ($stripeError): ?>
     <div class="error-box">⚠ Stripe error: <?= htmlspecialchars($stripeError) ?></div>
   <?php endif; ?>
-  <div style="font-size:10px;color:#334155;text-align:right;margin-bottom:8px">posthog.php: <?= POSTHOG_PHP_VERSION ?></div>
 
   <!-- Stats -->
   <div class="stats-row">
@@ -549,50 +548,6 @@ tr:hover td{background:#0f1a2e}
     <div class="stat-card"><div class="stat-label">Won</div><div class="stat-value green"><?= $stats['won'] ?></div></div>
     <div class="stat-card"><div class="stat-label">Lost</div><div class="stat-value red"><?= $stats['lost'] ?></div></div>
     <div class="stat-card"><div class="stat-label">Total $</div><div class="stat-value">$<?= number_format($stats['amount']/100,0) ?></div></div>
-  </div>
-
-  <!-- Evidence generator -->
-  <div class="card">
-    <div class="card-title">🔍 Generate Dispute Evidence</div>
-    <div class="form-row">
-      <input class="input" id="emailInput" type="email" placeholder="customer@email.com">
-      <select class="input" id="reasonSelect" style="flex:0 0 200px">
-        <option value="fraudulent">Fraudulent</option>
-        <option value="subscription_canceled">Subscription canceled</option>
-        <option value="product_not_received">Product not received</option>
-        <option value="product_unacceptable">Product unacceptable</option>
-        <option value="credit_not_processed">Credit not processed</option>
-        <option value="unrecognized">Unrecognized</option>
-      </select>
-      <button class="btn btn-primary" onclick="generateEvidence()">Generate Evidence</button>
-      <div class="spinner" id="spinner"></div>
-    </div>
-    <div id="errorMsg" style="color:#f87171;font-size:13px;margin-top:10px;display:none"></div>
-    <div style="margin-top:16px">
-      <div class="panels" id="panels">
-        <div class="panel">
-          <div class="phdr stripe">
-            📄 FOR STRIPE — rebuttal letter
-            <button class="copybtn" onclick="doCopy('st',this)">Copy</button>
-          </div>
-          <pre class="pbody" id="st"></pre>
-        </div>
-        <div class="panel">
-          <div class="phdr internal">
-            📊 ACTIVITY LOG — PostHog
-            <button class="copybtn" onclick="doCopy('il',this)">Copy</button>
-          </div>
-          <pre class="pbody" id="il"></pre>
-        </div>
-        <div class="panel" style="border-color:#6B4FBB55">
-          <div class="phdr" style="background:#1a0d33;color:#a78bfa;border-bottom:1px solid #6B4FBB44">
-            💬 INTERCOM — customer communications
-            <button class="copybtn" onclick="doCopy('icl',this)">Copy</button>
-          </div>
-          <pre class="pbody" id="icl" style="background:#0c0818"></pre>
-        </div>
-      </div>
-    </div>
   </div>
 
   <!-- Disputes table -->
@@ -631,10 +586,6 @@ tr:hover td{background:#0f1a2e}
         <td>
           <div class="actions-cell">
             <?php if ($em): ?>
-              <button class="btn btn-sm btn-primary"
-                onclick="fillAndGenerate('<?= htmlspecialchars(addslashes($em)) ?>','<?= htmlspecialchars(addslashes($r['reason'])) ?>')">
-                Generate Evidence
-              </button>
               <a class="btn btn-sm btn-stripe" target="_blank"
                 href="https://dashboard.stripe.com/disputes/<?= urlencode($r['id']) ?>">Stripe ↗</a>
               <a class="btn btn-sm btn-pdf"
@@ -657,49 +608,6 @@ tr:hover td{background:#0f1a2e}
 </div>
 
 <script>
-function generateEvidence() {
-    const email  = document.getElementById('emailInput').value.trim();
-    const reason = document.getElementById('reasonSelect').value;
-    if (!email) { showErr('Enter customer email'); return; }
-    hideErr();
-    document.getElementById('spinner').style.display = 'inline-block';
-    document.getElementById('panels').style.display  = 'none';
-
-    const fd = new FormData();
-    fd.append('action', 'preview');
-    fd.append('email',  email);
-    fd.append('reason', reason);
-
-    fetch('/', { method: 'POST', body: fd })
-        .then(r => r.json())
-        .then(data => {
-            if (data.error) { showErr(data.error); return; }
-            document.getElementById('st').textContent  = data.stripe_text  || '—';
-            document.getElementById('il').textContent  = data.internal_log || '—';
-            document.getElementById('icl').textContent = data.intercom_log || (data.intercom && !data.intercom.found ? '(Not in Intercom)' : '—');
-            document.getElementById('panels').style.display = 'grid';
-        })
-        .catch(e => showErr('Request failed: ' + e.message))
-        .finally(() => { document.getElementById('spinner').style.display = 'none'; });
-}
-
-function fillAndGenerate(email, reason) {
-    document.getElementById('emailInput').value = email;
-    document.getElementById('reasonSelect').value = reason;
-    generateEvidence();
-    document.getElementById('panels').scrollIntoView({ behavior: 'smooth' });
-}
-
-function doCopy(id, btn) {
-    const text = document.getElementById(id).textContent;
-    navigator.clipboard.writeText(text).then(() => {
-        btn.textContent = 'Copied!';
-        setTimeout(() => btn.textContent = 'Copy', 1500);
-    });
-}
-
-function showErr(msg) { const el = document.getElementById('errorMsg'); el.textContent = msg; el.style.display = 'block'; }
-function hideErr()    { document.getElementById('errorMsg').style.display = 'none'; }
 </script>
 </body>
 </html>
