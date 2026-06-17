@@ -47,6 +47,21 @@ function intercomGetFullConversation(string $convId): array {
 }
 
 /**
+ * Get a contact's company. For GigRadar teams, company.company_id == _gigradarTeamOid
+ * (the ObjectId used in the Mongo `proposals` collection).
+ */
+function intercomGetCompanyTeamOid(array $contact): string {
+    $companies = $contact['companies']['data'] ?? [];
+    if (empty($companies)) return '';
+    $companyId = $companies[0]['id'] ?? '';   // Intercom internal id
+    if (!$companyId) return '';
+    $company = intercomRequest('/companies/' . $companyId);
+    // company_id is GigRadar's own id == _gigradarTeamOid (24-hex ObjectId)
+    $oid = $company['company_id'] ?? '';
+    return preg_match('/^[a-f0-9]{24}$/i', $oid) ? $oid : '';
+}
+
+/**
  * Главная функция  -  возвращает всё для evidence
  */
 function getIntercomData(string $email): array {
@@ -188,6 +203,7 @@ function getIntercomData(string $email): array {
     return [
         'found'                    => true,
         'contact_id'               => $contact['id'],
+        'team_oid'                 => intercomGetCompanyTeamOid($contact),
         'stripe_id'                => $ca['stripe_id'] ?? '',
         'stripe_plan'              => $ca['stripe_plan'] ?? '',
         'stripe_last_charge'       => isset($ca['stripe_last_charge_amount'])
@@ -195,6 +211,11 @@ function getIntercomData(string $email): array {
                                        : null,
         'stripe_card_brand'        => $ca['stripe_card_brand'] ?? '',
         'stripe_status'            => $ca['stripe_subscription_status'] ?? '',
+        // Raw period/interval for subscription-window math (handles quarterly plans)
+        'stripe_period_start_ts'   => $ca['stripe_subscription_period_start_at'] ?? null,
+        'stripe_plan_interval'     => $ca['stripe_plan_interval'] ?? 'month',
+        'stripe_plan_interval_count' => (int)($ca['stripe_plan_interval_count'] ?? 1),
+        'stripe_plan_price'        => $ca['stripe_plan_price'] ?? null,
         'location'                 => $loc,
         'browser'                  => $contact['browser'] ?? '',
         'os'                       => $contact['os'] ?? '',
